@@ -1,0 +1,12 @@
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+*.log
+jobs/uploads/*
+jobs/tmp/*
+jobs/outputs/*
+.env

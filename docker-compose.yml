@@ -1,0 +1,18 @@
+services:
+  stt-subtitle:
+    build: .
+    container_name: stt_subtitle_webapp
+    ports:
+      - "8020:7860"
+    env_file:
+      - .env
+    volumes:
+      - ./jobs:/app/jobs
+      - ./.env:/app/.env:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7860/api/health"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 30s

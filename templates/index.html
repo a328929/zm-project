@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{{ app_title }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="bg bg1" aria-hidden="true"></div>
+  <div class="bg bg2" aria-hidden="true"></div>
+
+  <main class="container">
+    <header class="hero card">
+      <h1 id="title">极简语音识别字幕工坊</h1>
+      <p id="subtitle">上传音视频 → 物理 VAD 切片 → 高精度识别 → 下载 SRT 字幕</p>
+      <div class="inline">
+        <label for="uiLang" id="uiLangLabel">界面语言</label>
+        <select id="uiLang" aria-labelledby="uiLangLabel">
+          <option value="zh">简体中文</option>
+          <option value="en">English</option>
+          <option value="ja">日本語</option>
+        </select>
+      </div>
+    </header>
+
+    <section class="card">
+      <h2 id="cfgTitle">识别设置</h2>
+      <div class="grid">
+        <div class="field">
+          <label for="langSelect" id="langLabel">语音语言</label>
+          <select id="langSelect">
+            <option value="auto">自动判断 (auto)</option>
+            <option value="zh">中文 (zh)</option>
+            <option value="en">English (en)</option>
+            <option value="ja">日本語 (ja)</option>
+          </select>
+          <small id="langHint">仅支持：中文、英文、日语</small>
+        </div>
+
+        <div class="field">
+          <label for="modelSelect" id="modelLabel">模型选择</label>
+          <select id="modelSelect">
+            <option value="nova-2-general" {{ 'selected' if default_model == 'nova-2-general' else '' }}>nova-2-general (default)</option>
+            <option value="nova-3-general" {{ 'selected' if default_model == 'nova-3-general' else '' }}>nova-3-general</option>
+            <option value="whisper-large" {{ 'selected' if default_model == 'whisper-large' else '' }}>whisper-large</option>
+            <option value="{{ model_jp }}" {{ 'selected' if default_model == model_jp else '' }}>{{ model_jp }}</option>
+          </select>
+          <small id="modelHint">默认：nova-2-general（通用）；另含 nova-3-general、whisper-large、日语专精模型</small>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="fileInput" id="fileLabel">上传文件</label>
+        <div id="dropZone" tabindex="0" role="button" aria-labelledby="fileLabel fileHint">
+          <input id="fileInput" type="file"
+                 accept=".mp3,.wav,.m4a,.mp4,.aac,.flac,.ogg,.opus,.webm,.mov,.mkv,.mpeg,.mpg,.mpga,.mpe,.3gp,.m4v,.avi,audio/*,video/*" />
+          <p id="dropText">拖拽到这里，或点击选择</p>
+          <small id="fileHint">支持 mp3/wav/m4a/mp4 等，后端会自动转为标准音频</small>
+        </div>
+        <div id="pickedFile" class="picked" aria-live="polite"></div>
+      </div>
+
+      <details class="advanced" id="advPanel">
+        <summary id="advSummary">官方参数调节 (高级)</summary>
+        <div class="adv-grid">
+          <label><input type="checkbox" id="optPunctuate" checked> 自动标点 (punctuate)</label>
+          <label><input type="checkbox" id="optSmartFormat" checked> 智能格式 (smart_format)</label>
+          <label><input type="checkbox" id="optDiarize"> 说话人识别 (diarize)</label>
+          <label><input type="checkbox" id="optParagraphs"> 自动段落 (paragraphs)</label>
+          <label><input type="checkbox" id="optNumerals"> 数字转换 (numerals)</label>
+          <label><input type="checkbox" id="optProfanity"> 过滤脏话 (profanity)</label>
+
+          <label for="optUtteranceSplit" id="labelUttSplit">语音停顿检测 (秒)</label>
+          <input id="optUtteranceSplit" type="number" min="0.1" max="5" step="0.1" placeholder="0.5" value="0.5">
+
+          {% if auth_enabled %}
+          <label for="apiTokenInput" id="apiTokenLabel">API 访问令牌</label>
+          <input id="apiTokenInput" type="password" autocomplete="off" placeholder="输入 API_AUTH_TOKEN 后可调用接口">
+          {% else %}
+          <input type="hidden" id="apiTokenInput" value="">
+          {% endif %}
+        </div>
+      </details>
+
+      <div class="actions">
+        <button id="startBtn" class="btn-primary">开始识别并生成 SRT</button>
+        <button id="cancelBtn" class="btn-danger" disabled>取消当前任务</button>
+      </div>
+      <div id="notice" class="notice" aria-live="polite"></div>
+    </section>
+
+    <section class="card">
+      <h2 id="progTitle">识别进度</h2>
+      <div class="bar-wrap"><div id="bar" class="bar"></div></div>
+      <div id="progText" class="muted">0%</div>
+      <pre id="logBox" class="logs" aria-live="polite"></pre>
+      <div class="actions">
+        <a id="downloadBtn" class="btn-download hidden" href="#" download>下载字幕 .srt</a>
+      </div>
+    </section>
+
+    <section class="card" id="balanceCard">
+      <h2 id="balTitle">API 余额检查</h2>
+      <div class="grid">
+        <div class="field">
+          <label for="projectIdInput" id="projectLabel">Project ID（可选）</label>
+          <input id="projectIdInput" type="text" placeholder="留空则自动读取第一个项目">
+          <small id="projectHint">用于验证 API Key 是否可用、余额是否充足</small>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="checkBalanceBtn" class="btn-secondary">查看当前 API 余额</button>
+      </div>
+      <pre id="balanceBox" class="logs small"></pre>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
