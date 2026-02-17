@@ -70,6 +70,8 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+> 构建阶段已切换为 `uv pip` 安装依赖（更快），并将 `torchaudio` 约束为 `<2.9` 以避免 `torchcodec` 依赖报错。
+
 默认端口 `8020`（容器内 `7860`）。
 
 ---

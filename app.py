@@ -26,6 +26,7 @@ import threading
 import time
 import traceback
 import uuid
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -641,6 +642,51 @@ class SpeechSeg:
         return max(0.0, self.end - self.start)
 
 
+
+
+def load_audio_16k_mono_for_vad(wav_path: Path) -> torch.Tensor:
+    """
+    优先使用 silero_vad.read_audio；若 torchaudio 后端不可用，则回退标准库 wave 读取。
+    仅用于我们已标准化后的 16k/mono/wav 文件。
+    """
+    try:
+        return read_audio(str(wav_path), sampling_rate=16000)
+    except Exception:
+        pass
+
+    with wave.open(str(wav_path), "rb") as wf:
+        channels = wf.getnchannels()
+        sample_width = wf.getsampwidth()
+        sample_rate = wf.getframerate()
+        frame_count = wf.getnframes()
+        raw = wf.readframes(frame_count)
+
+    if frame_count <= 0:
+        return torch.zeros(0, dtype=torch.float32)
+
+    raw_buf = bytearray(raw)
+    if sample_width == 2:
+        pcm = torch.frombuffer(raw_buf, dtype=torch.int16).to(torch.float32) / 32768.0
+    elif sample_width == 1:
+        pcm = (torch.frombuffer(raw_buf, dtype=torch.uint8).to(torch.float32) - 128.0) / 128.0
+    elif sample_width == 4:
+        pcm = torch.frombuffer(raw_buf, dtype=torch.int32).to(torch.float32) / 2147483648.0
+    else:
+        raise RuntimeError(f"不支持的 WAV 位深: {sample_width * 8} bit")
+
+    if channels > 1:
+        pcm = pcm.view(-1, channels).mean(dim=1)
+
+    if sample_rate != 16000 and pcm.numel() > 0:
+        pcm = torch.nn.functional.interpolate(
+            pcm.view(1, 1, -1),
+            size=max(1, int(round(pcm.numel() * 16000 / float(sample_rate)))),
+            mode="linear",
+            align_corners=False,
+        ).view(-1)
+
+    return pcm.contiguous()
+
 def detect_speech_segments(wav_path: Path, vad_options: Dict[str, Any]) -> Tuple[List[SpeechSeg], float, int]:
     """
     返回: (segments, total_duration, split_count)
@@ -654,7 +700,7 @@ def detect_speech_segments(wav_path: Path, vad_options: Dict[str, Any]) -> Tuple
     min_speech_ms = int(clamp(float(vad_options.get("vad_min_speech_ms", Config.SILERO_MIN_SPEECH_MS)), 50, 3000))
     speech_pad_ms = int(clamp(float(vad_options.get("vad_speech_pad_ms", Config.SILERO_SPEECH_PAD_MS)), 0, 1000))
 
-    wav_tensor = read_audio(str(wav_path), sampling_rate=16000)
+    wav_tensor = load_audio_16k_mono_for_vad(wav_path)
     speech_ts = get_speech_timestamps(
         wav_tensor,
         SILERO_MODEL,
