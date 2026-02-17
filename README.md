@@ -138,8 +138,11 @@ docker compose up -d --build
 - 若你只更新了 `env_file` 而没有挂载 `.env` 文件，建议执行 `docker compose up -d --force-recreate` 让容器环境重建。
 - 可用 `GET /api/config` 检查当前是否读取到预期模型与开关配置（敏感密钥不会回显）。
 
-### Q5: Silero VAD 太慢怎么调？
-- 现在默认会使用 `VAD_CPU_THREADS=CPU核数`，并优先尝试 ONNX Runtime（官方推荐的 CPU 加速路径）。
+---
+
+## VAD 性能调优
+
+- 默认会使用 `VAD_CPU_THREADS=CPU核数`，并优先尝试 ONNX Runtime（官方推荐的 CPU 加速路径）。
 - 可在 `.env` 里显式设置 `VAD_CPU_THREADS`（例如 16/32）并保持 `ENABLE_ONNX_VAD=1`。
 - 如果你的机器 CPU 核数多但系统负载高，可把 `CONCURRENCY` 调低一点，给 VAD 阶段留出更多 CPU。
 
