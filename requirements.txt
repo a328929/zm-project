@@ -3,4 +3,3 @@ requests>=2.32.0
 python-dotenv>=1.0.1
 gunicorn>=23.0.0
 silero-vad>=5.1.2
-onnxruntime>=1.18.0
