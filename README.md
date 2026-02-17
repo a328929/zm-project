@@ -70,7 +70,9 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-> 构建阶段已切换为 `uv pip` 安装依赖（更快），并将 `torchaudio` 约束为 `<2.9` 以避免 `torchcodec` 依赖报错。
+> 构建阶段已切换为 `uv pip` 安装依赖（更快），并固定使用 **CPU 版** `torch/torchaudio`，减少镜像体积与安装时的重量级 CUDA 依赖。
+>
+> `docker-compose.yml` 已配置 `./:/app` 挂载。后续改代码后仅需 `docker compose restart` 即可生效，无需反复 `build`。
 
 默认端口 `8020`（容器内 `7860`）。
 
@@ -130,6 +132,16 @@ docker compose up -d --build
 
 ### Q3: 如何提升吞吐？
 - 提高 `CONCURRENCY`（片段并发）和 `JOB_WORKERS`（任务并发），同时提升机器 CPU/带宽。
+
+### Q4: 改了 `.env` 并 `docker compose restart`，为什么还是旧密钥或 401？
+- 常见原因是容器创建时注入的环境变量与 `.env` 文件不一致；本项目已改为应用启动时使用 `.env` 覆盖进程环境。
+- 若你只更新了 `env_file` 而没有挂载 `.env` 文件，建议执行 `docker compose up -d --force-recreate` 让容器环境重建。
+- 可用 `GET /api/config` 检查当前是否读取到预期模型与开关配置（敏感密钥不会回显）。
+
+### Q5: 日志里出现一批 `EMPTY_TRANSCRIPT` 是什么？
+- 这通常不是 API 鉴权错误，而是分段中混入了静音、呼吸声或极弱语音，识别服务返回空文本。
+- 现在服务会对空转写片段自动执行“扩窗 + 自动语言兜底”重试；仍为空时按“可忽略空片段”处理，不再逐条告警刷屏。
+- 若空片段占比偏高，可尝试提高 `vad_threshold`（如 `0.55~0.65`）或把 `vad_min_speech_ms` 调高到 `260~320`。
 
 ---
 

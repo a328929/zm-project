@@ -40,7 +40,7 @@ from silero_vad import get_speech_timestamps, load_silero_vad, read_audio
 from urllib3.util.retry import Retry
 from werkzeug.utils import secure_filename
 
-load_dotenv()
+load_dotenv(override=True)
 
 
 # -----------------------------
@@ -1213,13 +1213,15 @@ def transcribe_task(
             ok, txt, err, code = transcribe_with_hf(seg_file)
         else:
             ok, txt, err, code = transcribe_with_deepgram(seg_file, model, language, options)
-            # 对短片段的 EMPTY_TRANSCRIPT 做一次温和重试（扩窗），降低误空结果。
-            if (not ok) and err == "EMPTY_TRANSCRIPT" and seg.dur < 1.2:
-                pad = 0.22
+            # 对 EMPTY_TRANSCRIPT 做更稳健重试：扩窗 +（若指定语言）自动语言兜底。
+            if (not ok) and err == "EMPTY_TRANSCRIPT":
+                pad = 0.22 if seg.dur < 1.2 else (0.35 if seg.dur < 3.0 else 0.50)
                 retry_start = max(0.0, seg.start - pad)
                 retry_end = max(retry_start + 0.02, seg.end + pad)
                 extract_segment_wav(full_wav, seg_file, retry_start, retry_end)
-                ok, txt, err, code = transcribe_with_deepgram(seg_file, model, language, options)
+
+                retry_lang = "auto" if language != "auto" else language
+                ok, txt, err, code = transcribe_with_deepgram(seg_file, model, retry_lang, options)
 
         if ok:
             txt = normalize_transcript_text(txt, language, model=model)
@@ -1361,6 +1363,7 @@ def process_job(job_id: str) -> None:
 
         results: List[SegmentResult] = []
         fail_count = 0
+        empty_count = 0
         total = len(segments)
 
         with ThreadPoolExecutor(max_workers=Config.CONCURRENCY) as executor:
@@ -1387,9 +1390,12 @@ def process_job(job_id: str) -> None:
                 if r.ok:
                     results.append(r)
                 else:
-                    fail_count += 1
-                    if r.error and r.error not in {"CANCELLED"}:
-                        append_log(job_id, f"⚠️ 片段#{r.idx} 失败: {r.error}")
+                    if r.error in {"EMPTY_TRANSCRIPT", "EMPTY_AFTER_NORMALIZE", "HF_EMPTY_TRANSCRIPT"}:
+                        empty_count += 1
+                    else:
+                        fail_count += 1
+                        if r.error and r.error not in {"CANCELLED"}:
+                            append_log(job_id, f"⚠️ 片段#{r.idx} 失败: {r.error}")
 
                 p = 14 + (80 * done / max(1, total))
                 set_progress(job_id, p)
@@ -1400,7 +1406,10 @@ def process_job(job_id: str) -> None:
             return
 
         if not results:
-            raise RuntimeError(f"转录全量失败（失败段: {fail_count}）")
+            raise RuntimeError(f"转录全量失败（失败段: {fail_count + empty_count}）")
+
+        if empty_count > 0:
+            append_log(job_id, f"ℹ️ 空转写片段: {empty_count} 段（多为静音/呼吸/噪声），已自动忽略")
 
         if fail_count > 0:
             append_log(job_id, f"ℹ️ 部分片段失败: {fail_count} 段，已自动跳过")
