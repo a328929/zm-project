@@ -40,7 +40,7 @@ from silero_vad import get_speech_timestamps, load_silero_vad, read_audio
 from urllib3.util.retry import Retry
 from werkzeug.utils import secure_filename
 
-load_dotenv()
+load_dotenv(override=True)
 
 
 # -----------------------------
