@@ -27,6 +27,7 @@ import time
 import traceback
 import uuid
 import wave
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -200,6 +201,8 @@ META_DIRTY_LOCK = threading.RLock()
 
 JOB_QUEUE: "queue.Queue[str]" = queue.Queue()
 SHUTDOWN = threading.Event()
+
+EMPTY_SEGMENT_ERRORS = {"EMPTY_TRANSCRIPT", "EMPTY_AFTER_NORMALIZE", "HF_EMPTY_TRANSCRIPT"}
 
 SESSION = requests.Session()
 retries = Retry(
@@ -1057,8 +1060,6 @@ def allocate_line_times(seg_start: float, seg_end: float, lines: List[str]) -> L
     return fixed
 
 
-
-
 def deepgram_model_defaults(model: str) -> Dict[str, str]:
     """
     基于官方可用参数做保守默认值：
@@ -1188,6 +1189,13 @@ class SegmentResult:
     code: int = 0
 
 
+def _empty_retry_window(seg: SpeechSeg) -> Tuple[float, float]:
+    pad = 0.22 if seg.dur < 1.2 else (0.35 if seg.dur < 3.0 else 0.50)
+    retry_start = max(0.0, seg.start - pad)
+    retry_end = max(retry_start + 0.02, seg.end + pad)
+    return retry_start, retry_end
+
+
 def transcribe_task(
     job_id: str,
     idx: int,
@@ -1215,9 +1223,7 @@ def transcribe_task(
             ok, txt, err, code = transcribe_with_deepgram(seg_file, model, language, options)
             # 对 EMPTY_TRANSCRIPT 做更稳健重试：扩窗 +（若指定语言）自动语言兜底。
             if (not ok) and err == "EMPTY_TRANSCRIPT":
-                pad = 0.22 if seg.dur < 1.2 else (0.35 if seg.dur < 3.0 else 0.50)
-                retry_start = max(0.0, seg.start - pad)
-                retry_end = max(retry_start + 0.02, seg.end + pad)
+                retry_start, retry_end = _empty_retry_window(seg)
                 extract_segment_wav(full_wav, seg_file, retry_start, retry_end)
 
                 retry_lang = "auto" if language != "auto" else language
@@ -1390,7 +1396,7 @@ def process_job(job_id: str) -> None:
                 if r.ok:
                     results.append(r)
                 else:
-                    if r.error in {"EMPTY_TRANSCRIPT", "EMPTY_AFTER_NORMALIZE", "HF_EMPTY_TRANSCRIPT"}:
+                    if r.error in EMPTY_SEGMENT_ERRORS:
                         empty_count += 1
                     else:
                         fail_count += 1
@@ -1433,10 +1439,6 @@ def process_job(job_id: str) -> None:
         secure_rmtree(TMP_ROOT / job_id)
         release_job_lease(job_id)
         mark_meta_dirty(job_id)
-
-
-# ThreadPoolExecutor / as_completed 延后导入，避免上面注释阅读跳转噪音
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # -----------------------------
