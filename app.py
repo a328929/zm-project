@@ -737,6 +737,76 @@ def load_audio_16k_mono_for_vad(wav_path: Path) -> torch.Tensor:
 
     return pcm.contiguous()
 
+def _silero_pairs_from_tensor(
+    wav_tensor: torch.Tensor,
+    total_dur: float,
+    threshold: float,
+    min_silence_ms: int,
+    min_speech_ms: int,
+    speech_pad_ms: int,
+) -> List[Tuple[float, float]]:
+    with torch.inference_mode():
+        speech_ts = get_speech_timestamps(
+            wav_tensor,
+            SILERO_MODEL,
+            threshold=threshold,
+            sampling_rate=16000,
+            min_speech_duration_ms=min_speech_ms,
+            min_silence_duration_ms=min_silence_ms,
+            speech_pad_ms=speech_pad_ms,
+        )
+
+    pairs: List[Tuple[float, float]] = []
+    for item in speech_ts:
+        s = max(0.0, float(item.get("start", 0)) / 16000.0)
+        e = min(total_dur, float(item.get("end", 0)) / 16000.0)
+        if e > s:
+            pairs.append((s, e))
+    return pairs
+
+
+def _speech_ratio(pairs: List[Tuple[float, float]], total_dur: float) -> float:
+    if total_dur <= 0:
+        return 0.0
+    return max(0.0, min(1.0, sum(max(0.0, e - s) for s, e in pairs) / total_dur))
+
+
+def _maybe_relax_vad_options(
+    pairs: List[Tuple[float, float]],
+    total_dur: float,
+    threshold: float,
+    min_silence_ms: int,
+    min_speech_ms: int,
+    speech_pad_ms: int,
+    preset: str,
+) -> Tuple[float, int, int, int, bool]:
+    ratio = _speech_ratio(pairs, total_dur)
+    should_relax = total_dur >= Config.VAD_RELAX_MIN_AUDIO_SECONDS and ratio < Config.VAD_LOW_SPEECH_RATIO
+    if not should_relax:
+        return threshold, min_silence_ms, min_speech_ms, speech_pad_ms, False
+
+    p = (preset or "general").lower()
+    if p == "asmr":
+        # ASMR 已偏召回，二次放宽幅度应更保守
+        relaxed_threshold = clamp(threshold * 0.90, 0.15, 0.95)
+        relaxed_min_silence = int(clamp(min_silence_ms * 0.80, 120, 3000))
+        relaxed_min_speech = int(clamp(min_speech_ms * 0.80, 70, 3000))
+        relaxed_pad = int(clamp(max(speech_pad_ms, 160) * 1.30, 0, 420))
+    elif p == "mixed":
+        relaxed_threshold = clamp(threshold * 0.82, 0.16, 0.95)
+        relaxed_min_silence = int(clamp(min_silence_ms * 0.72, 120, 3000))
+        relaxed_min_speech = int(clamp(min_speech_ms * 0.72, 75, 3000))
+        relaxed_pad = int(clamp(max(speech_pad_ms, 150) * 1.50, 0, 440))
+    else:
+        # general: 漏检时放宽幅度最大
+        relaxed_threshold = clamp(threshold * 0.75, 0.18, 0.95)
+        relaxed_min_silence = int(clamp(min_silence_ms * 0.65, 120, 3000))
+        relaxed_min_speech = int(clamp(min_speech_ms * 0.60, 80, 3000))
+        relaxed_pad = int(clamp(max(speech_pad_ms, 140) * 1.8, 0, 450))
+
+    return relaxed_threshold, relaxed_min_silence, relaxed_min_speech, relaxed_pad, True
+
+
 def detect_speech_segments(wav_path: Path, vad_options: Dict[str, Any]) -> Tuple[List[SpeechSeg], float, int]:
     """
     返回: (segments, total_duration, split_count)
@@ -762,12 +832,45 @@ def detect_speech_segments(wav_path: Path, vad_options: Dict[str, Any]) -> Tuple
             speech_pad_ms=speech_pad_ms,
         )
 
-    pairs: List[Tuple[float, float]] = []
-    for item in speech_ts:
-        s = max(0.0, float(item.get("start", 0)) / 16000.0)
-        e = min(total_dur, float(item.get("end", 0)) / 16000.0)
-        if e > s:
-            pairs.append((s, e))
+    relaxed_threshold, relaxed_min_silence, relaxed_min_speech, relaxed_pad, relaxed = _maybe_relax_vad_options(
+        pairs,
+        total_dur,
+        threshold,
+        min_silence_ms,
+        min_speech_ms,
+        speech_pad_ms,
+        str(vad_options.get("__vad_preset", "general")),
+    )
+    if relaxed:
+        relaxed_pairs = _silero_pairs_from_tensor(
+            wav_tensor,
+            total_dur,
+            relaxed_threshold,
+            relaxed_min_silence,
+            relaxed_min_speech,
+            relaxed_pad,
+        )
+        base_ratio = _speech_ratio(pairs, total_dur)
+        relaxed_ratio = _speech_ratio(relaxed_pairs, total_dur)
+        if relaxed_ratio >= min(0.98, base_ratio * 1.8 + 0.05):
+            pairs = relaxed_pairs
+            vad_options["__vad_relaxed"] = {
+                "from": {
+                    "threshold": round(threshold, 3),
+                    "min_silence_ms": min_silence_ms,
+                    "min_speech_ms": min_speech_ms,
+                    "speech_pad_ms": speech_pad_ms,
+                    "ratio": round(base_ratio * 100.0, 2),
+                },
+                "to": {
+                    "preset": str(vad_options.get("__vad_preset", "general")),
+                    "threshold": round(relaxed_threshold, 3),
+                    "min_silence_ms": relaxed_min_silence,
+                    "min_speech_ms": relaxed_min_speech,
+                    "speech_pad_ms": relaxed_pad,
+                    "ratio": round(relaxed_ratio * 100.0, 2),
+                },
+            }
 
     # 模型没检出语音时，回退整段，避免任务直接空失败
     if not pairs:
@@ -856,6 +959,7 @@ def resolve_vad_options(options: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         except Exception:
             pass
 
+    out["__vad_preset"] = preset
     return preset, out
 
 
@@ -1408,6 +1512,19 @@ def process_job(job_id: str) -> None:
             job_id,
             f"🎙️ Silero VAD 完成: {len(segments)} 段 | 分裂 {split_count} 次 | 有声占比 {ratio:.1f}% | preset={vad_preset} threshold={vad_threshold:.2f} min_silence={vad_min_silence_ms}ms min_speech={vad_min_speech_ms}ms pad={vad_speech_pad_ms}ms | 合并短段 {merged_short} | 丢弃超短 {dropped_short}",
         )
+        relaxed_meta = vad_options.get("__vad_relaxed") if isinstance(vad_options, dict) else None
+        if isinstance(relaxed_meta, dict):
+            f0 = relaxed_meta.get("from", {})
+            f1 = relaxed_meta.get("to", {})
+            append_log(
+                job_id,
+                "ℹ️ VAD 检测到低有声占比，已自动放宽参数(联动 preset): "
+                f"threshold {f0.get('threshold')}→{f1.get('threshold')}, "
+                f"min_silence {f0.get('min_silence_ms')}→{f1.get('min_silence_ms')}ms, "
+                f"min_speech {f0.get('min_speech_ms')}→{f1.get('min_speech_ms')}ms, "
+                f"pad {f0.get('speech_pad_ms')}→{f1.get('speech_pad_ms')}ms, "
+                f"有声占比 {f0.get('ratio')}%→{f1.get('ratio')}%",
+            )
         set_progress(job_id, 14)
 
         if is_cancel_requested(job_id):
