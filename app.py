@@ -152,8 +152,6 @@ class Config:
     VAD_CPU_THREADS = _env_int("VAD_CPU_THREADS", os.cpu_count() or 1, minimum=1, maximum=256)
     VAD_INTEROP_THREADS = _env_int("VAD_INTEROP_THREADS", 1, minimum=1, maximum=64)
     ENABLE_ONNX_VAD = _env_bool("ENABLE_ONNX_VAD", True)
-    VAD_LOW_SPEECH_RATIO = _env_float("VAD_LOW_SPEECH_RATIO", 0.08, minimum=0.01, maximum=0.5)
-    VAD_RELAX_MIN_AUDIO_SECONDS = _env_int("VAD_RELAX_MIN_AUDIO_SECONDS", 300, minimum=30, maximum=36000)
 
     # 元数据写盘节流
     META_FLUSH_INTERVAL_SECONDS = _env_float("META_FLUSH_INTERVAL_SECONDS", 0.8, minimum=0.2, maximum=5.0)
@@ -823,14 +821,16 @@ def detect_speech_segments(wav_path: Path, vad_options: Dict[str, Any]) -> Tuple
     speech_pad_ms = int(clamp(float(vad_options.get("vad_speech_pad_ms", Config.SILERO_SPEECH_PAD_MS)), 0, 1000))
 
     wav_tensor = load_audio_16k_mono_for_vad(wav_path)
-    pairs = _silero_pairs_from_tensor(
-        wav_tensor,
-        total_dur,
-        threshold,
-        min_silence_ms,
-        min_speech_ms,
-        speech_pad_ms,
-    )
+    with torch.inference_mode():
+        speech_ts = get_speech_timestamps(
+            wav_tensor,
+            SILERO_MODEL,
+            threshold=threshold,
+            sampling_rate=16000,
+            min_speech_duration_ms=min_speech_ms,
+            min_silence_duration_ms=min_silence_ms,
+            speech_pad_ms=speech_pad_ms,
+        )
 
     relaxed_threshold, relaxed_min_silence, relaxed_min_speech, relaxed_pad, relaxed = _maybe_relax_vad_options(
         pairs,
