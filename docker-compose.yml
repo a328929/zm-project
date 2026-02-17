@@ -7,6 +7,7 @@ services:
     env_file:
       - .env
     volumes:
+      - ./:/app
       - ./jobs:/app/jobs
       - ./.env:/app/.env:ro
     restart: unless-stopped
