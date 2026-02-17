@@ -39,6 +39,7 @@ from flask import Flask, jsonify, render_template, request, send_file
 from requests.adapters import HTTPAdapter
 from silero_vad import get_speech_timestamps, load_silero_vad, read_audio
 from urllib3.util.retry import Retry
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
 load_dotenv(override=True)
@@ -195,6 +196,32 @@ for p in (UPLOADS_ROOT, TMP_ROOT, OUTPUTS_ROOT, META_ROOT, LOCK_ROOT):
 app = Flask(__name__)
 app.config["SECRET_KEY"] = _env_str("FLASK_SECRET_KEY", "change-me")
 app.config["MAX_CONTENT_LENGTH"] = Config.MAX_CONTENT_LENGTH
+
+
+def _is_api_path() -> bool:
+    return request.path.startswith("/api/")
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_request_too_large(e: RequestEntityTooLarge):
+    if _is_api_path():
+        return jsonify({"ok": False, "error": f"上传文件过大（上限 {Config.MAX_UPLOAD_MB}MB）"}), 413
+    return e
+
+
+@app.errorhandler(HTTPException)
+def handle_http_exception(e: HTTPException):
+    if _is_api_path():
+        return jsonify({"ok": False, "error": e.description or e.name}), e.code or 500
+    return e
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_exception(e: Exception):
+    if _is_api_path():
+        app.logger.error("Unhandled API exception\n" + traceback.format_exc())
+        return jsonify({"ok": False, "error": "服务器内部错误，请稍后重试"}), 500
+    raise e
 
 
 # -----------------------------

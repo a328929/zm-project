@@ -257,6 +257,22 @@
     return { "X-API-Token": token };
   }
 
+  async function parseApiResponse(res) {
+    const raw = await res.text();
+    if (!raw) return {};
+
+    try {
+      return JSON.parse(raw);
+    } catch (_) {
+      const compact = raw
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 160);
+      throw new Error(`服务器返回了非 JSON 响应 (HTTP ${res.status})${compact ? `: ${compact}` : ""}`);
+    }
+  }
+
   function collectOptions() {
     const threshold = Number(optVadThreshold.value || 0.5);
     if (!Number.isFinite(threshold) || threshold < 0.1 || threshold > 0.95) {
@@ -343,7 +359,7 @@
   async function loadServerConfig() {
     try {
       const res = await fetch("/api/config", { headers: getAuthHeaders() });
-      const data = await res.json();
+      const data = await parseApiResponse(res);
       if (!res.ok || !data.ok) return;
 
       const vd = data.vad_defaults || {};
@@ -384,7 +400,7 @@
   async function getFastBalance() {
     try {
       const r = await fetch("/api/balance", { headers: getAuthHeaders() });
-      const d = await r.json();
+      const d = await parseApiResponse(r);
       return d.ok ? Number(d.total) : null;
     } catch (_) {
       return null;
@@ -422,7 +438,7 @@
 
     try {
       const res = await fetch("/api/start", { method: "POST", body: fd, headers: getAuthHeaders() });
-      const data = await res.json();
+      const data = await parseApiResponse(res);
       if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
 
       currentJobId = data.job_id;
@@ -441,7 +457,7 @@
         method: "POST",
         headers: getAuthHeaders()
       });
-      const data = await res.json();
+      const data = await parseApiResponse(res);
       if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
       addLog(t("cancelSent"));
     } catch (err) {
@@ -455,7 +471,7 @@
       const res = await fetch(`/api/status/${encodeURIComponent(currentJobId)}?since=${since}`, {
         headers: getAuthHeaders()
       });
-      const data = await res.json();
+      const data = await parseApiResponse(res);
       if (!res.ok || !data.ok) {
         addLog("❌ " + t("statusErr") + (data.error || res.statusText));
         stopPolling();
@@ -527,7 +543,7 @@
 
     try {
       const res = await fetch(url, { headers: getAuthHeaders() });
-      const data = await res.json();
+      const data = await parseApiResponse(res);
       if (!res.ok || !data.ok) {
         balanceBox.textContent = `❌ ${data.error || res.statusText}`;
         return;
