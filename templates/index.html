@@ -13,7 +13,7 @@
   <main class="container">
     <header class="hero card">
       <h1 id="title">极简语音识别字幕工坊</h1>
-      <p id="subtitle">上传音视频 → 物理 VAD 切片 → 高精度识别 → 下载 SRT 字幕</p>
+      <p id="subtitle">上传音视频 → Silero VAD 神经切片 → 高精度识别 → 下载 SRT 字幕</p>
       <div class="inline">
         <label for="uiLang" id="uiLangLabel">界面语言</label>
         <select id="uiLang" aria-labelledby="uiLangLabel">
@@ -68,25 +68,37 @@
           <label><input type="checkbox" id="optSmartFormat" checked> 智能格式 (smart_format)</label>
 
           <div class="adv-item">
-            <label for="optUtteranceSplit" id="labelUttSplit">语音停顿检测 (utterance_split, 秒)</label>
-            <small id="uttSplitDesc">控制切段灵敏度。小=切更碎；大=更连贯。建议通用 0.45~0.7，ASMR 0.7~1.2。</small>
-            <input id="optUtteranceSplit" type="number" min="0.1" max="5" step="0.1" placeholder="0.5" value="0.5">
-          </div>
-
-          <div class="adv-item">
-            <label for="optVadProfile" id="labelVadProfile">活动语音分段模式 (vad_profile)</label>
-            <small id="vadProfileDesc">balanced/general 适合通用音频；asmr 会尽量保留低能量耳语细节。</small>
-            <select id="optVadProfile">
-              <option value="balanced">balanced（默认）</option>
-              <option value="general">general（通用强化）</option>
-              <option value="asmr">asmr（耳语保留）</option>
+            <label for="optVadPreset" id="labelVadPreset">VAD 预设方案 (vad_preset)</label>
+            <small id="vadPresetDesc">general=通用；asmr=低能量耳语；mixed=混合素材折中。可继续自定义下方细项。</small>
+            <select id="optVadPreset">
+              <option value="general">general（通用）</option>
+              <option value="asmr">asmr（耳语）</option>
+              <option value="mixed">mixed（混合）</option>
             </select>
           </div>
 
           <div class="adv-item">
-            <label for="optVadNoiseDb" id="labelVadNoise">VAD 噪声阈值 (vad_noise_db, dB)</label>
-            <small id="vadNoiseDesc">范围 -70 ~ -10。更低（如 -45）更容易保留弱语音，更高（如 -30）更偏强过滤。</small>
-            <input id="optVadNoiseDb" type="number" min="-70" max="-10" step="1" placeholder="-35" value="-35">
+            <label for="optVadThreshold" id="labelVadThreshold">Silero 检测阈值 (vad_threshold)</label>
+            <small id="vadThresholdDesc">范围 0.1~0.95。更低更容易判定为语音（召回高），更高更保守（精度高）。</small>
+            <input id="optVadThreshold" type="number" min="0.1" max="0.95" step="0.01" placeholder="0.5" value="0.5">
+          </div>
+
+          <div class="adv-item">
+            <label for="optVadMinSilenceMs" id="labelVadMinSilence">最小静音时长 (vad_min_silence_ms)</label>
+            <small id="vadMinSilenceDesc">范围 50~3000 ms。值越大，切段越少、更连贯。</small>
+            <input id="optVadMinSilenceMs" type="number" min="50" max="3000" step="10" placeholder="400" value="400">
+          </div>
+
+          <div class="adv-item">
+            <label for="optVadMinSpeechMs" id="labelVadMinSpeech">最小语音时长 (vad_min_speech_ms)</label>
+            <small id="vadMinSpeechDesc">范围 50~3000 ms。过滤瞬时噪声，减少无效短片段。</small>
+            <input id="optVadMinSpeechMs" type="number" min="50" max="3000" step="10" placeholder="220" value="220">
+          </div>
+
+          <div class="adv-item">
+            <label for="optVadSpeechPadMs" id="labelVadSpeechPad">语音边界补偿 (vad_speech_pad_ms)</label>
+            <small id="vadSpeechPadDesc">范围 0~1000 ms。给每段首尾补上下文，减少截断词。</small>
+            <input id="optVadSpeechPadMs" type="number" min="0" max="1000" step="10" placeholder="120" value="120">
           </div>
 
           {% if auth_enabled %}

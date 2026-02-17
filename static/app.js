@@ -23,13 +23,14 @@
 
   const optPunctuate = $("optPunctuate");
   const optSmartFormat = $("optSmartFormat");
-  const optUtteranceSplit = $("optUtteranceSplit");
-  const optVadProfile = $("optVadProfile");
-  const optVadNoiseDb = $("optVadNoiseDb");
+  const optVadPreset = $("optVadPreset");
+  const optVadThreshold = $("optVadThreshold");
+  const optVadMinSilenceMs = $("optVadMinSilenceMs");
+  const optVadMinSpeechMs = $("optVadMinSpeechMs");
+  const optVadSpeechPadMs = $("optVadSpeechPadMs");
   const apiTokenInput = $("apiTokenInput");
 
   const LS_KEY = "zmv6_ui_pref";
-  const ALLOWED_VAD_PROFILES = ["balanced", "general", "asmr"];
 
   let pollTimer = null;
   let currentJobId = null;
@@ -39,7 +40,7 @@
   const i18n = {
     zh: {
       title: "极简语音识别字幕工坊",
-      subtitle: "上传音视频 → 物理 VAD 切片 → 高精度识别 → 下载 SRT 字幕",
+      subtitle: "上传音视频 → Silero VAD 神经切片 → 高精度识别 → 下载 SRT 字幕",
       cfgTitle: "识别设置",
       langLabel: "语音语言",
       langHint: "仅支持：中文、英文、日语",
@@ -49,12 +50,16 @@
       dropText: "拖拽到这里，或点击选择",
       fileHint: "支持 mp3/wav/m4a/mp4 等，后端会自动处理",
       advSummary: "官方参数调节 (高级)",
-      labelUttSplit: "语音停顿检测 (秒)",
-      uttSplitDesc: "控制切段灵敏度：小=切更碎；大=更连贯。建议通用 0.45~0.7，ASMR 0.7~1.2。",
-      labelVadProfile: "活动语音分段模式",
-      vadProfileDesc: "balanced/general 适合通用音频；asmr 更保留耳语细节。",
-      labelVadNoise: "VAD 噪声阈值 (dB)",
-      vadNoiseDesc: "范围 -70~-10。更低更保留弱语音；更高更偏强过滤。",
+      labelVadPreset: "VAD 预设方案",
+      vadPresetDesc: "general=通用；asmr=耳语；mixed=混合折中。下方参数可继续微调。",
+      labelVadThreshold: "Silero 检测阈值",
+      vadThresholdDesc: "范围 0.1~0.95。低=召回高，高=更保守。",
+      labelVadMinSilence: "最小静音时长 (ms)",
+      vadMinSilenceDesc: "范围 50~3000。越大切段越少。",
+      labelVadMinSpeech: "最小语音时长 (ms)",
+      vadMinSpeechDesc: "范围 50~3000。过滤瞬时噪声。",
+      labelVadSpeechPad: "语音边界补偿 (ms)",
+      vadSpeechPadDesc: "范围 0~1000。为首尾补上下文。",
       startBtn: "开始识别并生成 SRT",
       cancelBtn: "取消当前任务",
       progTitle: "识别进度",
@@ -77,14 +82,16 @@
       savePref: "✅ 已自动保存参数",
       cancelSent: "🛑 取消请求已发送",
       cancelFailed: "取消失败：",
-      uttSplitInvalid: "utterance_split 必须在 0.1 到 5 之间",
-      vadNoiseInvalid: "vad_noise_db 必须在 -70 到 -10 之间",
+      vadThresholdInvalid: "vad_threshold 必须在 0.1 到 0.95 之间",
+      vadMinSilenceInvalid: "vad_min_silence_ms 必须在 50 到 3000 之间",
+      vadMinSpeechInvalid: "vad_min_speech_ms 必须在 50 到 3000 之间",
+      vadSpeechPadInvalid: "vad_speech_pad_ms 必须在 0 到 1000 之间",
       authTip: "此服务启用了接口鉴权，请填写访问令牌",
       statusErr: "状态查询失败："
     },
     en: {
       title: "Ultra-Stable STT Studio",
-      subtitle: "Upload media → Physical VAD Splitting → High-precision STT → Download SRT",
+      subtitle: "Upload media → Silero Neural VAD Segmentation → High-precision STT → Download SRT",
       cfgTitle: "Transcription Settings",
       langLabel: "Spoken Language",
       langHint: "Supported: Chinese, English, Japanese",
@@ -94,12 +101,16 @@
       dropText: "Drag file here, or click to select",
       fileHint: "Supports mp3/wav/m4a/mp4 and more.",
       advSummary: "Official Parameters (Advanced)",
-      labelUttSplit: "Silence Threshold (sec)",
-      uttSplitDesc: "Segmentation sensitivity: lower=more splits, higher=more continuity. General 0.45~0.7, ASMR 0.7~1.2.",
-      labelVadProfile: "VAD Profile",
-      vadProfileDesc: "balanced/general for typical audio; asmr preserves low-energy whisper details.",
-      labelVadNoise: "VAD Noise Threshold (dB)",
-      vadNoiseDesc: "Range -70~-10. Lower keeps weak speech, higher filters more aggressively.",
+      labelVadPreset: "VAD Preset",
+      vadPresetDesc: "general = generic, asmr = whisper-focused, mixed = balanced hybrid. You can still fine-tune below.",
+      labelVadThreshold: "Silero VAD Threshold",
+      vadThresholdDesc: "Range 0.1~0.95. Lower = higher recall, higher = stricter speech detection.",
+      labelVadMinSilence: "Min Silence Duration (ms)",
+      vadMinSilenceDesc: "Range 50~3000. Higher values create fewer, longer segments.",
+      labelVadMinSpeech: "Min Speech Duration (ms)",
+      vadMinSpeechDesc: "Range 50~3000. Filters impulsive noise-like fragments.",
+      labelVadSpeechPad: "Speech Padding (ms)",
+      vadSpeechPadDesc: "Range 0~1000. Adds context around speech boundaries.",
       startBtn: "Start Transcription",
       cancelBtn: "Cancel Current Job",
       progTitle: "Progress",
@@ -122,14 +133,16 @@
       savePref: "✅ Preferences auto-saved",
       cancelSent: "🛑 Cancel request sent",
       cancelFailed: "Cancel failed: ",
-      uttSplitInvalid: "utterance_split must be between 0.1 and 5",
-      vadNoiseInvalid: "vad_noise_db must be between -70 and -10",
+      vadThresholdInvalid: "vad_threshold must be between 0.1 and 0.95",
+      vadMinSilenceInvalid: "vad_min_silence_ms must be between 50 and 3000",
+      vadMinSpeechInvalid: "vad_min_speech_ms must be between 50 and 3000",
+      vadSpeechPadInvalid: "vad_speech_pad_ms must be between 0 and 1000",
       authTip: "This service requires API token",
       statusErr: "Status query failed: "
     },
     ja: {
       title: "極簡音声認識字幕工房",
-      subtitle: "音声/動画アップロード → 物理VAD切断 → 高精度認識 → SRTダウンロード",
+      subtitle: "音声/動画アップロード → SileroニューラルVAD分割 → 高精度認識 → SRTダウンロード",
       cfgTitle: "認識設定",
       langLabel: "音声言語",
       langHint: "対応: 中国語・英語・日本語",
@@ -139,12 +152,16 @@
       dropText: "ここにドラッグ、またはクリックして選択",
       fileHint: "mp3/wav/m4a/mp4 などに対応",
       advSummary: "詳細パラメータ (Advanced)",
-      labelUttSplit: "音声停止検出 (秒)",
-      uttSplitDesc: "分割感度：小さいほど細かく分割、大きいほど連続。一般 0.45~0.7、ASMR 0.7~1.2 推奨。",
-      labelVadProfile: "VADプロファイル",
-      vadProfileDesc: "balanced/general は汎用向け、asmr は低音量ささやき保持向け。",
-      labelVadNoise: "VADノイズ閾値 (dB)",
-      vadNoiseDesc: "範囲 -70~-10。低いほど弱い音声を残しやすく、高いほど強く除去。",
+      labelVadPreset: "VADプリセット",
+      vadPresetDesc: "general=汎用、asmr=ささやき重視、mixed=混合向け。下の値で微調整可能。",
+      labelVadThreshold: "Silero VADしきい値",
+      vadThresholdDesc: "範囲 0.1~0.95。低いほど検出しやすく、高いほど厳格。",
+      labelVadMinSilence: "最小無音長 (ms)",
+      vadMinSilenceDesc: "範囲 50~3000。大きいほど分割数が減る。",
+      labelVadMinSpeech: "最小発話長 (ms)",
+      vadMinSpeechDesc: "範囲 50~3000。瞬間ノイズ片を除去。",
+      labelVadSpeechPad: "音声境界パディング (ms)",
+      vadSpeechPadDesc: "範囲 0~1000。前後に文脈を追加。",
       startBtn: "認識開始してSRTを生成",
       cancelBtn: "現在のジョブを中止",
       progTitle: "進捗状況",
@@ -167,8 +184,10 @@
       savePref: "✅ 設定を自動保存しました",
       cancelSent: "🛑 キャンセル要求を送信しました",
       cancelFailed: "キャンセル失敗: ",
-      uttSplitInvalid: "utterance_split は 0.1〜5 の範囲で指定してください",
-      vadNoiseInvalid: "vad_noise_db は -70〜-10 の範囲で指定してください",
+      vadThresholdInvalid: "vad_threshold は 0.1〜0.95 の範囲で指定してください",
+      vadMinSilenceInvalid: "vad_min_silence_ms は 50〜3000 の範囲で指定してください",
+      vadMinSpeechInvalid: "vad_min_speech_ms は 50〜3000 の範囲で指定してください",
+      vadSpeechPadInvalid: "vad_speech_pad_ms は 0〜1000 の範囲で指定してください",
       authTip: "このサービスは API トークン認証が有効です",
       statusErr: "ステータス取得失敗: "
     }
@@ -185,7 +204,7 @@
   }
 
   function applyI18n() {
-    ["title", "subtitle", "cfgTitle", "langLabel", "langHint", "modelLabel", "modelHint", "fileLabel", "dropText", "fileHint", "advSummary", "labelUttSplit", "uttSplitDesc", "labelVadProfile", "vadProfileDesc", "labelVadNoise", "vadNoiseDesc", "startBtn", "cancelBtn", "progTitle", "balTitle", "projectLabel", "projectHint", "checkBalanceBtn"].forEach((k) => setText(k, k));
+    ["title", "subtitle", "cfgTitle", "langLabel", "langHint", "modelLabel", "modelHint", "fileLabel", "dropText", "fileHint", "advSummary", "labelVadPreset", "vadPresetDesc", "labelVadThreshold", "vadThresholdDesc", "labelVadMinSilence", "vadMinSilenceDesc", "labelVadMinSpeech", "vadMinSpeechDesc", "labelVadSpeechPad", "vadSpeechPadDesc", "startBtn", "cancelBtn", "progTitle", "balTitle", "projectLabel", "projectHint", "checkBalanceBtn"].forEach((k) => setText(k, k));
     downloadBtn.textContent = t("downloadBtn");
     updateNoticeForModel();
   }
@@ -239,24 +258,36 @@
   }
 
   function collectOptions() {
-    let utt = Number(optUtteranceSplit.value || 0.5);
-    if (!Number.isFinite(utt) || utt < 0.1 || utt > 5) {
-      throw new Error(t("uttSplitInvalid"));
+    const threshold = Number(optVadThreshold.value || 0.5);
+    if (!Number.isFinite(threshold) || threshold < 0.1 || threshold > 0.95) {
+      throw new Error(t("vadThresholdInvalid"));
     }
 
-    let vadNoise = Number(optVadNoiseDb.value || -35);
-    if (!Number.isFinite(vadNoise) || vadNoise < -70 || vadNoise > -10) {
-      throw new Error(t("vadNoiseInvalid"));
+    const minSilence = Number(optVadMinSilenceMs.value || 400);
+    if (!Number.isFinite(minSilence) || minSilence < 50 || minSilence > 3000) {
+      throw new Error(t("vadMinSilenceInvalid"));
     }
 
-    const vadProfile = (optVadProfile.value || "balanced").trim().toLowerCase();
+    const minSpeech = Number(optVadMinSpeechMs.value || 220);
+    if (!Number.isFinite(minSpeech) || minSpeech < 50 || minSpeech > 3000) {
+      throw new Error(t("vadMinSpeechInvalid"));
+    }
+
+    const speechPad = Number(optVadSpeechPadMs.value || 120);
+    if (!Number.isFinite(speechPad) || speechPad < 0 || speechPad > 1000) {
+      throw new Error(t("vadSpeechPadInvalid"));
+    }
+
+    const preset = (optVadPreset.value || "general").trim().toLowerCase();
 
     return {
       smart_format: !!optSmartFormat.checked,
       punctuate: !!optPunctuate.checked,
-      utterance_split: Number(utt.toFixed(2)),
-      vad_profile: ALLOWED_VAD_PROFILES.includes(vadProfile) ? vadProfile : "balanced",
-      vad_noise_db: Number(vadNoise.toFixed(1))
+      vad_preset: ["general", "asmr", "mixed"].includes(preset) ? preset : "general",
+      vad_threshold: Number(threshold.toFixed(2)),
+      vad_min_silence_ms: Math.round(minSilence),
+      vad_min_speech_ms: Math.round(minSpeech),
+      vad_speech_pad_ms: Math.round(speechPad)
     };
   }
 
@@ -268,9 +299,11 @@
       opt: {
         punctuate: !!optPunctuate.checked,
         smart_format: !!optSmartFormat.checked,
-        utterance_split: Number(optUtteranceSplit.value || 0.5),
-        vad_profile: (optVadProfile.value || "balanced"),
-        vad_noise_db: Number(optVadNoiseDb.value || -35)
+        vad_preset: (optVadPreset.value || "general"),
+        vad_threshold: Number(optVadThreshold.value || 0.5),
+        vad_min_silence_ms: Number(optVadMinSilenceMs.value || 400),
+        vad_min_speech_ms: Number(optVadMinSpeechMs.value || 220),
+        vad_speech_pad_ms: Number(optVadSpeechPadMs.value || 120)
       }
     };
     try { localStorage.setItem(LS_KEY, JSON.stringify(pref)); } catch (_) {}
@@ -288,15 +321,21 @@
     if (pref.opt) {
       optPunctuate.checked = !!pref.opt.punctuate;
       optSmartFormat.checked = !!pref.opt.smart_format;
-      if (Number.isFinite(Number(pref.opt.utterance_split))) {
-        optUtteranceSplit.value = String(pref.opt.utterance_split);
+      if (typeof pref.opt.vad_preset === "string") {
+        const pp = String(pref.opt.vad_preset).toLowerCase();
+        optVadPreset.value = ["general", "asmr", "mixed"].includes(pp) ? pp : "general";
       }
-      if (typeof pref.opt.vad_profile === "string") {
-        const pv = String(pref.opt.vad_profile).toLowerCase();
-        optVadProfile.value = ALLOWED_VAD_PROFILES.includes(pv) ? pv : "balanced";
+      if (Number.isFinite(Number(pref.opt.vad_threshold))) {
+        optVadThreshold.value = String(pref.opt.vad_threshold);
       }
-      if (Number.isFinite(Number(pref.opt.vad_noise_db))) {
-        optVadNoiseDb.value = String(pref.opt.vad_noise_db);
+      if (Number.isFinite(Number(pref.opt.vad_min_silence_ms))) {
+        optVadMinSilenceMs.value = String(pref.opt.vad_min_silence_ms);
+      }
+      if (Number.isFinite(Number(pref.opt.vad_min_speech_ms))) {
+        optVadMinSpeechMs.value = String(pref.opt.vad_min_speech_ms);
+      }
+      if (Number.isFinite(Number(pref.opt.vad_speech_pad_ms))) {
+        optVadSpeechPadMs.value = String(pref.opt.vad_speech_pad_ms);
       }
     }
   }
@@ -308,34 +347,35 @@
       if (!res.ok || !data.ok) return;
 
       const vd = data.vad_defaults || {};
-      const minSilence = Number(vd.min_silence);
-      if (Number.isFinite(minSilence)) {
-        optUtteranceSplit.value = String(minSilence);
-      }
 
-      const noiseDb = Number(vd.noise_db);
-      if (Number.isFinite(noiseDb)) {
-        optVadNoiseDb.value = String(noiseDb);
-      }
+      const preset = String(vd.vad_preset || "").toLowerCase();
+      if (["general", "asmr", "mixed"].includes(preset)) optVadPreset.value = preset;
 
-      const profile = String(vd.profile || "").toLowerCase();
-      if (ALLOWED_VAD_PROFILES.includes(profile)) {
-        optVadProfile.value = profile;
-      }
-
-      const profiles = Array.isArray(vd.profiles) ? vd.profiles.map((x) => String(x).toLowerCase()) : [];
-      if (profiles.length > 0) {
-        const current = optVadProfile.value;
-        optVadProfile.innerHTML = "";
-        profiles.forEach((p) => {
-          if (!ALLOWED_VAD_PROFILES.includes(p)) return;
+      const presets = vd.vad_presets || {};
+      if (presets && typeof presets === "object") {
+        const current = optVadPreset.value || "general";
+        optVadPreset.innerHTML = "";
+        ["general", "asmr", "mixed"].forEach((k) => {
+          if (!presets[k]) return;
           const op = document.createElement("option");
-          op.value = p;
-          op.textContent = p === "balanced" ? "balanced（默认）" : (p === "general" ? "general（通用强化）" : "asmr（耳语保留）");
-          optVadProfile.appendChild(op);
+          op.value = k;
+          op.textContent = `${k}（${(presets[k].label || k)}）`;
+          optVadPreset.appendChild(op);
         });
-        if ([...optVadProfile.options].some((x) => x.value === current)) optVadProfile.value = current;
+        if ([...optVadPreset.options].some((x) => x.value === current)) optVadPreset.value = current;
       }
+
+      const threshold = Number(vd.vad_threshold);
+      if (Number.isFinite(threshold)) optVadThreshold.value = String(threshold);
+
+      const minSilence = Number(vd.vad_min_silence_ms);
+      if (Number.isFinite(minSilence)) optVadMinSilenceMs.value = String(minSilence);
+
+      const minSpeech = Number(vd.vad_min_speech_ms);
+      if (Number.isFinite(minSpeech)) optVadMinSpeechMs.value = String(minSpeech);
+
+      const speechPad = Number(vd.vad_speech_pad_ms);
+      if (Number.isFinite(speechPad)) optVadSpeechPadMs.value = String(speechPad);
     } catch (_) {
       // ignore; keep local defaults
     }
@@ -542,7 +582,7 @@
   langSelect.addEventListener("change", persistPref);
   fileInput.addEventListener("change", updatePickedFile);
 
-  [optPunctuate, optSmartFormat, optUtteranceSplit, optVadProfile, optVadNoiseDb].forEach((el) => {
+  [optPunctuate, optSmartFormat, optVadPreset, optVadThreshold, optVadMinSilenceMs, optVadMinSpeechMs, optVadSpeechPadMs].forEach((el) => {
     el.addEventListener("change", persistPref);
   });
 

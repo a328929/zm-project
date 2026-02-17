@@ -31,9 +31,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
+import torch
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request, send_file
 from requests.adapters import HTTPAdapter
+from silero_vad import get_speech_timestamps, load_silero_vad, read_audio
 from urllib3.util.retry import Retry
 from werkzeug.utils import secure_filename
 
@@ -135,9 +137,15 @@ class Config:
     # 质量调优
     MAX_SEGMENT_SECONDS = _env_float("MAX_SEGMENT_SECONDS", 15.0, minimum=5.0, maximum=30.0)
     MIN_SEGMENT_SECONDS = _env_float("MIN_SEGMENT_SECONDS", 0.25, minimum=0.1, maximum=2.0)
-    VAD_MIN_SILENCE_DEFAULT = _env_float("VAD_MIN_SILENCE_DEFAULT", 0.5, minimum=0.1, maximum=3.0)
-    VAD_NOISE_DB_DEFAULT = _env_float("VAD_NOISE_DB_DEFAULT", -35.0, minimum=-70.0, maximum=-10.0)
-    VAD_PROFILE_DEFAULT = _env_str("VAD_PROFILE_DEFAULT", "balanced").lower()
+    MIN_TRANSCRIBE_SEGMENT_SECONDS = _env_float("MIN_TRANSCRIBE_SEGMENT_SECONDS", 0.45, minimum=0.2, maximum=2.0)
+    SHORT_SEGMENT_MERGE_GAP_SECONDS = _env_float("SHORT_SEGMENT_MERGE_GAP_SECONDS", 0.2, minimum=0.0, maximum=1.0)
+
+    # Silero VAD（神经网络）
+    SILERO_VAD_THRESHOLD = _env_float("SILERO_VAD_THRESHOLD", 0.50, minimum=0.1, maximum=0.95)
+    SILERO_MIN_SILENCE_MS = _env_int("SILERO_MIN_SILENCE_MS", 400, minimum=50, maximum=3000)
+    SILERO_MIN_SPEECH_MS = _env_int("SILERO_MIN_SPEECH_MS", 220, minimum=50, maximum=3000)
+    SILERO_SPEECH_PAD_MS = _env_int("SILERO_SPEECH_PAD_MS", 120, minimum=0, maximum=1000)
+    VAD_PRESET_DEFAULT = _env_str("VAD_PRESET_DEFAULT", "general").lower()
 
     # 元数据写盘节流
     META_FLUSH_INTERVAL_SECONDS = _env_float("META_FLUSH_INTERVAL_SECONDS", 0.8, minimum=0.2, maximum=5.0)
@@ -205,6 +213,9 @@ retries = Retry(
 adapter = HTTPAdapter(max_retries=retries, pool_connections=32, pool_maxsize=128)
 SESSION.mount("http://", adapter)
 SESSION.mount("https://", adapter)
+
+torch.set_num_threads(max(1, min(4, os.cpu_count() or 1)))
+SILERO_MODEL = load_silero_vad()
 
 
 # -----------------------------
@@ -618,12 +629,8 @@ def require_api_auth() -> Optional[Tuple[Any, int]]:
 
 
 # -----------------------------
-# VAD 与切片
+# VAD 与切片（Silero VAD）
 # -----------------------------
-SILENCE_RE_START = re.compile(r"silence_start: ([\d\.]+)")
-SILENCE_RE_END = re.compile(r"silence_end: ([\d\.]+)")
-
-
 @dataclass
 class SpeechSeg:
     start: float
@@ -634,40 +641,7 @@ class SpeechSeg:
         return max(0.0, self.end - self.start)
 
 
-def _parse_silence(stderr: str) -> Tuple[List[float], List[float]]:
-    starts = [float(m) for m in SILENCE_RE_START.findall(stderr)]
-    ends = [float(m) for m in SILENCE_RE_END.findall(stderr)]
-    starts.sort()
-    ends.sort()
-    return starts, ends
-
-
-def _vad_filter_chain(min_silence: float, noise_db: float, profile: str) -> str:
-    """
-    参考 ffmpeg silencedetect/agate 参数语义：
-    - ASMR: 更保留弱语音，尽量减少门限抑制；
-    - balanced/general: 适度频带约束 + 轻门限，提升通用场景鲁棒性。
-    """
-    p = (profile or "balanced").lower()
-    noise_db = clamp(float(noise_db), -70.0, -10.0)
-    min_silence = clamp(float(min_silence), 0.1, 5.0)
-
-    if p == "asmr":
-        # 保留耳语与低能量细节，避免 agate 误杀。
-        return (
-            "highpass=f=50,lowpass=f=9000,"
-            f"silencedetect=noise={noise_db:.1f}dB:d={min_silence:.2f}"
-        )
-
-    # balanced/general
-    return (
-        "highpass=f=300,lowpass=f=3000,"
-        "agate=threshold=-30dB:range=0:attack=50:release=200,"
-        f"silencedetect=noise={noise_db:.1f}dB:d={min_silence:.2f}"
-    )
-
-
-def detect_speech_segments(wav_path: Path, min_silence: float, noise_db: float, profile: str) -> Tuple[List[SpeechSeg], float, int]:
+def detect_speech_segments(wav_path: Path, vad_options: Dict[str, Any]) -> Tuple[List[SpeechSeg], float, int]:
     """
     返回: (segments, total_duration, split_count)
     """
@@ -675,38 +649,30 @@ def detect_speech_segments(wav_path: Path, min_silence: float, noise_db: float, 
     if total_dur <= 0.05:
         return [], 0.0, 0
 
-    filter_chain = _vad_filter_chain(min_silence=min_silence, noise_db=noise_db, profile=profile)
+    threshold = clamp(float(vad_options.get("vad_threshold", Config.SILERO_VAD_THRESHOLD)), 0.1, 0.95)
+    min_silence_ms = int(clamp(float(vad_options.get("vad_min_silence_ms", Config.SILERO_MIN_SILENCE_MS)), 50, 3000))
+    min_speech_ms = int(clamp(float(vad_options.get("vad_min_speech_ms", Config.SILERO_MIN_SPEECH_MS)), 50, 3000))
+    speech_pad_ms = int(clamp(float(vad_options.get("vad_speech_pad_ms", Config.SILERO_SPEECH_PAD_MS)), 0, 1000))
 
-    proc = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-i", str(wav_path), "-af", filter_chain, "-f", "null", "-"],
-        stderr=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        text=True,
-        timeout=480,
+    wav_tensor = read_audio(str(wav_path), sampling_rate=16000)
+    speech_ts = get_speech_timestamps(
+        wav_tensor,
+        SILERO_MODEL,
+        threshold=threshold,
+        sampling_rate=16000,
+        min_speech_duration_ms=min_speech_ms,
+        min_silence_duration_ms=min_silence_ms,
+        speech_pad_ms=speech_pad_ms,
     )
-    if proc.returncode != 0:
-        err = (proc.stderr or "").strip().replace("\n", " ")[:220]
-        raise RuntimeError(f"VAD_FFMPEG_ERR: {err or 'unknown ffmpeg error'}")
 
-    starts, ends = _parse_silence(proc.stderr or "")
-
-    # 由静音区间反推出语音区间（并做容错）
     pairs: List[Tuple[float, float]] = []
-    ei = 0
-    last = 0.0
-    for s in starts:
-        while ei < len(ends) and ends[ei] <= s:
-            last = max(last, ends[ei])
-            ei += 1
-        if s > last + 0.05:
-            pairs.append((last, s))
-    while ei < len(ends):
-        last = max(last, ends[ei])
-        ei += 1
-    if last < total_dur - 0.05:
-        pairs.append((last, total_dur))
+    for item in speech_ts:
+        s = max(0.0, float(item.get("start", 0)) / 16000.0)
+        e = min(total_dur, float(item.get("end", 0)) / 16000.0)
+        if e > s:
+            pairs.append((s, e))
 
-    # 没检测到静音时，直接整段
+    # 模型没检出语音时，回退整段，避免任务直接空失败
     if not pairs:
         pairs = [(0.0, total_dur)]
 
@@ -731,6 +697,120 @@ def detect_speech_segments(wav_path: Path, min_silence: float, noise_db: float, 
             cur = nxt
 
     return out, total_dur, split_count
+
+
+def vad_presets() -> Dict[str, Dict[str, Any]]:
+    # 三套场景预设：通用 / ASMR / 混合
+    return {
+        "general": {
+            "label": "通用（会议/视频/播客）",
+            "vad_threshold": 0.55,
+            "vad_min_silence_ms": 420,
+            "vad_min_speech_ms": 240,
+            "vad_speech_pad_ms": 110,
+            "desc": "抑制碎段，适合普通语速与背景噪声。",
+        },
+        "asmr": {
+            "label": "ASMR（低能量耳语）",
+            "vad_threshold": 0.35,
+            "vad_min_silence_ms": 300,
+            "vad_min_speech_ms": 140,
+            "vad_speech_pad_ms": 180,
+            "desc": "提高弱语音召回，减少耳语漏检。",
+        },
+        "mixed": {
+            "label": "混合（ASMR + 通用）",
+            "vad_threshold": 0.45,
+            "vad_min_silence_ms": 360,
+            "vad_min_speech_ms": 180,
+            "vad_speech_pad_ms": 140,
+            "desc": "在召回与误检间折中，适合混合素材。",
+        },
+    }
+
+
+def resolve_vad_options(options: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    presets = vad_presets()
+    preset = str(options.get("vad_preset", Config.VAD_PRESET_DEFAULT) or Config.VAD_PRESET_DEFAULT).strip().lower()
+
+    # 向后兼容旧参数：vad_profile
+    legacy_profile = str(options.get("vad_profile", "")).strip().lower()
+    if legacy_profile == "asmr":
+        preset = "asmr"
+    elif legacy_profile in {"balanced", "general"}:
+        preset = "general"
+
+    if preset not in presets:
+        preset = "general"
+
+    base = presets[preset]
+    out = {
+        "vad_threshold": clamp(float(options.get("vad_threshold", base["vad_threshold"])), 0.1, 0.95),
+        "vad_min_silence_ms": int(clamp(float(options.get("vad_min_silence_ms", base["vad_min_silence_ms"])), 50, 3000)),
+        "vad_min_speech_ms": int(clamp(float(options.get("vad_min_speech_ms", base["vad_min_speech_ms"])), 50, 3000)),
+        "vad_speech_pad_ms": int(clamp(float(options.get("vad_speech_pad_ms", base["vad_speech_pad_ms"])), 0, 1000)),
+    }
+
+    # 向后兼容旧参数：utterance_split（秒）-> min_silence_ms
+    if "utterance_split" in options:
+        try:
+            ms = int(clamp(float(options.get("utterance_split")) * 1000.0, 50, 3000))
+            out["vad_min_silence_ms"] = ms
+        except Exception:
+            pass
+
+    return preset, out
+
+
+def optimize_segments_for_transcription(
+    segments: List[SpeechSeg],
+    min_transcribe_seconds: float,
+    merge_gap_seconds: float,
+    max_segment_seconds: float,
+) -> Tuple[List[SpeechSeg], int, int]:
+    """
+    通过“短段就地合并”降低空白/极短片段触发 EMPTY_TRANSCRIPT 的概率。
+    返回: (优化后片段, 合并次数, 丢弃次数)
+    """
+    if not segments:
+        return [], 0, 0
+
+    min_dur = clamp(float(min_transcribe_seconds), 0.2, 2.0)
+    merge_gap = clamp(float(merge_gap_seconds), 0.0, 1.0)
+    max_dur = max(2.0, float(max_segment_seconds))
+
+    src = sorted(segments, key=lambda x: (x.start, x.end))
+    out: List[SpeechSeg] = []
+    merged_count = 0
+    dropped_count = 0
+
+    for seg in src:
+        seg = SpeechSeg(seg.start, seg.end)
+        if seg.dur >= min_dur:
+            out.append(seg)
+            continue
+
+        merged = False
+        # 优先向后合并：短段 + 紧邻后段
+        if out:
+            prev = out[-1]
+            gap_prev = max(0.0, seg.start - prev.end)
+            if gap_prev <= merge_gap and (seg.end - prev.start) <= max_dur:
+                out[-1] = SpeechSeg(prev.start, max(prev.end, seg.end))
+                merged_count += 1
+                merged = True
+
+        if not merged:
+            # 保留单独短段的最后兜底：避免全部丢弃导致段空
+            if seg.dur >= max(0.22, min_dur * 0.6):
+                out.append(seg)
+            else:
+                dropped_count += 1
+
+    if not out and src:
+        out = [src[0]]
+
+    return out, merged_count, dropped_count
 
 
 def extract_segment_wav(full_wav: Path, out_wav: Path, start: float, end: float) -> None:
@@ -1087,6 +1167,13 @@ def transcribe_task(
             ok, txt, err, code = transcribe_with_hf(seg_file)
         else:
             ok, txt, err, code = transcribe_with_deepgram(seg_file, model, language, options)
+            # 对短片段的 EMPTY_TRANSCRIPT 做一次温和重试（扩窗），降低误空结果。
+            if (not ok) and err == "EMPTY_TRANSCRIPT" and seg.dur < 1.2:
+                pad = 0.22
+                retry_start = max(0.0, seg.start - pad)
+                retry_end = max(retry_start + 0.02, seg.end + pad)
+                extract_segment_wav(full_wav, seg_file, retry_start, retry_end)
+                ok, txt, err, code = transcribe_with_deepgram(seg_file, model, language, options)
 
         if ok:
             txt = normalize_transcript_text(txt, language, model=model)
@@ -1183,37 +1270,41 @@ def process_job(job_id: str) -> None:
         set_progress(job_id, 8)
         append_log(job_id, "✅ 音频标准化完成 (16k/mono/wav)")
 
-        utt_split = options.get("utterance_split", Config.VAD_MIN_SILENCE_DEFAULT)
-        try:
-            min_silence = clamp(float(utt_split), 0.1, 5.0)
-        except Exception:
-            min_silence = Config.VAD_MIN_SILENCE_DEFAULT
+        vad_preset, vad_options = resolve_vad_options(options)
+        vad_threshold = float(vad_options["vad_threshold"])
+        vad_min_silence_ms = int(vad_options["vad_min_silence_ms"])
+        vad_min_speech_ms = int(vad_options["vad_min_speech_ms"])
+        vad_speech_pad_ms = int(vad_options["vad_speech_pad_ms"])
 
-        vad_noise_raw = options.get("vad_noise_db", Config.VAD_NOISE_DB_DEFAULT)
-        try:
-            vad_noise_db = clamp(float(vad_noise_raw), -70.0, -10.0)
-        except Exception:
-            vad_noise_db = Config.VAD_NOISE_DB_DEFAULT
-
-        vad_profile = str(options.get("vad_profile", Config.VAD_PROFILE_DEFAULT) or "balanced").strip().lower()
-        if vad_profile not in {"balanced", "general", "asmr"}:
-            vad_profile = "balanced"
-
-        segments, total_dur, split_count = detect_speech_segments(
-            wav,
-            min_silence=min_silence,
-            noise_db=vad_noise_db,
-            profile=vad_profile,
-        )
+        segments, total_dur, split_count = detect_speech_segments(wav, vad_options=vad_options)
         touch_heartbeat(job_id)
         if not segments:
             raise RuntimeError("未检测到有效语音片段")
+
+        min_transcribe = options.get("min_transcribe_segment_seconds", Config.MIN_TRANSCRIBE_SEGMENT_SECONDS)
+        try:
+            min_transcribe_sec = clamp(float(min_transcribe), 0.2, 2.0)
+        except Exception:
+            min_transcribe_sec = Config.MIN_TRANSCRIBE_SEGMENT_SECONDS
+
+        merge_gap = options.get("short_segment_merge_gap_seconds", Config.SHORT_SEGMENT_MERGE_GAP_SECONDS)
+        try:
+            merge_gap_sec = clamp(float(merge_gap), 0.0, 1.0)
+        except Exception:
+            merge_gap_sec = Config.SHORT_SEGMENT_MERGE_GAP_SECONDS
+
+        segments, merged_short, dropped_short = optimize_segments_for_transcription(
+            segments,
+            min_transcribe_seconds=min_transcribe_sec,
+            merge_gap_seconds=merge_gap_sec,
+            max_segment_seconds=Config.MAX_SEGMENT_SECONDS,
+        )
 
         speech_sum = sum(s.dur for s in segments)
         ratio = (speech_sum / total_dur * 100.0) if total_dur > 0 else 0.0
         append_log(
             job_id,
-            f"🎙️ VAD 完成: {len(segments)} 段 | 分裂 {split_count} 次 | 有声占比 {ratio:.1f}% | profile={vad_profile} noise={vad_noise_db:.1f}dB silence={min_silence:.2f}s",
+            f"🎙️ Silero VAD 完成: {len(segments)} 段 | 分裂 {split_count} 次 | 有声占比 {ratio:.1f}% | preset={vad_preset} threshold={vad_threshold:.2f} min_silence={vad_min_silence_ms}ms min_speech={vad_min_speech_ms}ms pad={vad_speech_pad_ms}ms | 合并短段 {merged_short} | 丢弃超短 {dropped_short}",
         )
         set_progress(job_id, 14)
 
@@ -1432,10 +1523,15 @@ def api_config():
             "supported_lang": sorted(Config.SUPPORTED_LANG),
             "supported_models": sorted(Config.SUPPORTED_MODELS),
             "vad_defaults": {
-                "profile": Config.VAD_PROFILE_DEFAULT,
-                "noise_db": Config.VAD_NOISE_DB_DEFAULT,
-                "min_silence": Config.VAD_MIN_SILENCE_DEFAULT,
-                "profiles": ["balanced", "general", "asmr"],
+                "engine": "silero-vad",
+                "vad_threshold": Config.SILERO_VAD_THRESHOLD,
+                "vad_min_silence_ms": Config.SILERO_MIN_SILENCE_MS,
+                "vad_min_speech_ms": Config.SILERO_MIN_SPEECH_MS,
+                "vad_speech_pad_ms": Config.SILERO_SPEECH_PAD_MS,
+                "vad_preset": Config.VAD_PRESET_DEFAULT if Config.VAD_PRESET_DEFAULT in vad_presets() else "general",
+                "vad_presets": vad_presets(),
+                "min_transcribe_segment_seconds": Config.MIN_TRANSCRIBE_SEGMENT_SECONDS,
+                "short_segment_merge_gap_seconds": Config.SHORT_SEGMENT_MERGE_GAP_SECONDS,
             },
             "auth_enabled": bool(Config.API_AUTH_TOKEN),
         }
