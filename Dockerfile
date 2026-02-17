@@ -17,10 +17,12 @@ WORKDIR /app
 
 COPY requirements.txt ./
 
-# 2. 核心修改：
-# - 去掉了 pip install uv (上面已经 COPY 了)
-# - 去掉了 --no-cache (允许使用缓存，或者至少不强制重新下载)
-# - --system 表示装在系统环境里
+# 优先安装 CPU 版 PyTorch，避免默认源拉取体积更大的 CUDA 依赖
+RUN uv pip install --system \
+    --index-url https://download.pytorch.org/whl/cpu \
+    torch==2.8.0 torchaudio==2.8.0
+
+# 其余依赖走默认源
 RUN uv pip install --system -r requirements.txt
 
 COPY . .
