@@ -110,6 +110,8 @@ docker compose up -d --build
 | `DOWNLOAD_GRACE_SECONDS` | 下载后宽限秒数 | `60` |
 | `SECURE_DELETE_PASSES` | 删除覆盖轮次 | `0` |
 | `API_AUTH_TOKEN` | 接口鉴权令牌（可选） | 空 |
+| `VAD_CPU_THREADS` | Silero VAD CPU 线程数 | `CPU核数` |
+| `ENABLE_ONNX_VAD` | 启用 ONNX Runtime 加速 | `1` |
 
 ---
 

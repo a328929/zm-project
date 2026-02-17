@@ -148,6 +148,9 @@ class Config:
     SILERO_MIN_SPEECH_MS = _env_int("SILERO_MIN_SPEECH_MS", 220, minimum=50, maximum=3000)
     SILERO_SPEECH_PAD_MS = _env_int("SILERO_SPEECH_PAD_MS", 120, minimum=0, maximum=1000)
     VAD_PRESET_DEFAULT = _env_str("VAD_PRESET_DEFAULT", "general").lower()
+    VAD_CPU_THREADS = _env_int("VAD_CPU_THREADS", os.cpu_count() or 1, minimum=1, maximum=256)
+    VAD_INTEROP_THREADS = _env_int("VAD_INTEROP_THREADS", 1, minimum=1, maximum=64)
+    ENABLE_ONNX_VAD = _env_bool("ENABLE_ONNX_VAD", True)
 
     # 元数据写盘节流
     META_FLUSH_INTERVAL_SECONDS = _env_float("META_FLUSH_INTERVAL_SECONDS", 0.8, minimum=0.2, maximum=5.0)
@@ -172,6 +175,9 @@ class Config:
             f"成功保留 {cls.DONE_RETENTION_SECONDS}s | 失败保留 {cls.ERROR_RETENTION_SECONDS}s | 孤儿阈值 {cls.ORPHAN_RETENTION_SECONDS}s"
         )
         print(f"API 鉴权: {'开启' if cls.API_AUTH_TOKEN else '关闭(兼容模式)'}")
+        print(
+            f"VAD 加速: threads={cls.VAD_CPU_THREADS} interop={cls.VAD_INTEROP_THREADS} onnx={'on' if cls.ENABLE_ONNX_VAD else 'off'}"
+        )
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -218,8 +224,22 @@ adapter = HTTPAdapter(max_retries=retries, pool_connections=32, pool_maxsize=128
 SESSION.mount("http://", adapter)
 SESSION.mount("https://", adapter)
 
-torch.set_num_threads(max(1, min(4, os.cpu_count() or 1)))
-SILERO_MODEL = load_silero_vad()
+torch.set_num_threads(Config.VAD_CPU_THREADS)
+try:
+    torch.set_num_interop_threads(Config.VAD_INTEROP_THREADS)
+except RuntimeError:
+    # 某些运行时在线程池初始化后不可重复设置 interop 线程，忽略即可。
+    pass
+
+if Config.ENABLE_ONNX_VAD:
+    try:
+        SILERO_MODEL = load_silero_vad(onnx=True)
+        app.logger.info("Silero VAD runtime: ONNX")
+    except Exception as e:
+        app.logger.warning(f"Silero ONNX 初始化失败，回退 PyTorch runtime: {e}")
+        SILERO_MODEL = load_silero_vad()
+else:
+    SILERO_MODEL = load_silero_vad()
 
 
 # -----------------------------
@@ -704,15 +724,16 @@ def detect_speech_segments(wav_path: Path, vad_options: Dict[str, Any]) -> Tuple
     speech_pad_ms = int(clamp(float(vad_options.get("vad_speech_pad_ms", Config.SILERO_SPEECH_PAD_MS)), 0, 1000))
 
     wav_tensor = load_audio_16k_mono_for_vad(wav_path)
-    speech_ts = get_speech_timestamps(
-        wav_tensor,
-        SILERO_MODEL,
-        threshold=threshold,
-        sampling_rate=16000,
-        min_speech_duration_ms=min_speech_ms,
-        min_silence_duration_ms=min_silence_ms,
-        speech_pad_ms=speech_pad_ms,
-    )
+    with torch.inference_mode():
+        speech_ts = get_speech_timestamps(
+            wav_tensor,
+            SILERO_MODEL,
+            threshold=threshold,
+            sampling_rate=16000,
+            min_speech_duration_ms=min_speech_ms,
+            min_silence_duration_ms=min_silence_ms,
+            speech_pad_ms=speech_pad_ms,
+        )
 
     pairs: List[Tuple[float, float]] = []
     for item in speech_ts:
