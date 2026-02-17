@@ -271,9 +271,6 @@
     try {
       return JSON.parse(raw);
     } catch (_) {
-      if (res.status === 413) {
-        throw new Error(t("fileTooLargeProxy413"));
-      }
       const compact = raw
         .replace(/<[^>]+>/g, " ")
         .replace(/\s+/g, " ")
