@@ -197,7 +197,8 @@ retries = Retry(
     read=Config.REQUEST_RETRY_TIMES,
     backoff_factor=0.6,
     status_forcelist=(408, 429, 500, 502, 503, 504),
-    allowed_methods=frozenset(["GET", "POST"]),
+    # 转写 POST 非幂等，避免自动重试导致重复计费或重复提交。
+    allowed_methods=frozenset(["GET"]),
 )
 adapter = HTTPAdapter(max_retries=retries, pool_connections=32, pool_maxsize=128)
 SESSION.mount("http://", adapter)
@@ -706,6 +707,10 @@ def detect_speech_segments(wav_path: Path, min_silence: float) -> Tuple[List[Spe
 
 
 def extract_segment_wav(full_wav: Path, out_wav: Path, start: float, end: float) -> None:
+    duration = max(0.0, end - start)
+    if duration < 0.01:
+        raise ValueError(f"segment too short: start={start:.6f}, end={end:.6f}")
+
     ensure_parent(out_wav)
     run_cmd(
         [
@@ -718,8 +723,8 @@ def extract_segment_wav(full_wav: Path, out_wav: Path, start: float, end: float)
             str(full_wav),
             "-ss",
             f"{start:.3f}",
-            "-to",
-            f"{end:.3f}",
+            "-t",
+            f"{duration:.3f}",
             "-af",
             "dynaudnorm=p=0.9:s=5",
             "-ac",
@@ -737,7 +742,7 @@ def extract_segment_wav(full_wav: Path, out_wav: Path, start: float, end: float)
 # -----------------------------
 # 转写与文本质量优化
 # -----------------------------
-def normalize_transcript_text(text: str, language: str = "auto") -> str:
+def normalize_transcript_text(text: str, language: str = "auto", model: str = "") -> str:
     if not text:
         return ""
     x = html.unescape(str(text))
@@ -758,18 +763,32 @@ def normalize_transcript_text(text: str, language: str = "auto") -> str:
     # 降噪：大量重复标点折叠
     x = re.sub(r"([!?！？。.,，])\1{2,}", r"\1\1", x)
 
-    # 若模型输出全部是按字空格（典型 whisper 异常），再做一次紧缩
-    if language in {"zh", "ja", "auto"}:
+    model_l = (model or "").lower()
+
+    # 若模型输出全部是按字空格（典型 whisper/kotoba 在 CJK 场景异常），再做一次紧缩
+    if language in {"zh", "ja", "auto"} or "whisper" in model_l or "kotoba" in model_l:
         x = re.sub(rf"(?<=[{cjk}])\s+(?=[{cjk}])", "", x)
+        x = re.sub(rf"(?<=[{cjk}])\s+(?=[，。！？、；：])", "", x)
+        x = re.sub(rf"(?<=[，。！？、；：])\s+(?=[{cjk}])", "", x)
 
     return x.strip()
 
 
-def _split_by_punctuation(text: str) -> List[str]:
+def _split_by_punctuation(text: str, language: str = "auto") -> List[str]:
     if not text:
         return []
-    # 按句末标点切开，保留标点
-    parts = re.split(r"(?<=[。！？!?；;\.!?])\s+", text)
+    # 按句末标点切开，保留标点（兼容中英日）
+    parts = re.split(r"(?<=[。！？!?；;…\.!?])\s+", text)
+    # 英文长句再按逗号/分号弱切，减少单行过长
+    if language == "en":
+        tmp: List[str] = []
+        for p in parts:
+            p = p.strip()
+            if len(p) > 72 and re.search(r",|;", p):
+                tmp.extend([x for x in re.split(r"(?<=[,;])\s+", p) if x.strip()])
+            else:
+                tmp.append(p)
+        parts = tmp
     out: List[str] = []
     for p in parts:
         p = p.strip()
@@ -778,19 +797,24 @@ def _split_by_punctuation(text: str) -> List[str]:
     return out if out else [text]
 
 
-def _char_budget(language: str) -> int:
-    if language in {"zh", "ja"}:
+def _char_budget(language: str, model: str = "") -> int:
+    model_l = (model or "").lower()
+    if language == "ja":
+        return 20
+    if language == "zh":
+        return 24
+    if language == "auto" and ("kotoba" in model_l or "whisper" in model_l):
         return 22
     return 42
 
 
-def split_text_for_srt(text: str, language: str, max_chars: Optional[int] = None) -> List[str]:
+def split_text_for_srt(text: str, language: str, max_chars: Optional[int] = None, model: str = "") -> List[str]:
     if not text:
         return []
-    budget = max_chars or _char_budget(language)
+    budget = max_chars or _char_budget(language, model=model)
     budget = max(10, min(100, budget))
 
-    sentences = _split_by_punctuation(text)
+    sentences = _split_by_punctuation(text, language=language)
     lines: List[str] = []
     cur = ""
 
@@ -880,19 +904,38 @@ def allocate_line_times(seg_start: float, seg_end: float, lines: List[str]) -> L
     return fixed
 
 
+
+
+def deepgram_model_defaults(model: str) -> Dict[str, str]:
+    """
+    基于官方可用参数做保守默认值：
+    - nova-2/3: 对话/通用场景，保留 smart_format + punctuate + utterances
+    - whisper-large: 以可读字幕优先，保留 punctuate/utterances，smart_format 默认关闭以减少格式化副作用
+    所有值都允许被 options 显式覆盖。
+    """
+    m = (model or "").lower()
+    base = {
+        "smart_format": "true",
+        "punctuate": "true",
+        "diarize": "false",
+        "paragraphs": "false",
+        "numerals": "false",
+        "profanity_filter": "false",
+        "utterances": "true",
+        "filler_words": "false",
+    }
+    if m == "whisper-large":
+        base["smart_format"] = "false"
+    return base
+
 def transcribe_with_deepgram(seg_file: Path, model: str, language: str, options: Dict[str, Any]) -> Tuple[bool, str, str, int]:
     if not Config.DEEPGRAM_API_KEY:
         return False, "", "DEEPGRAM_API_KEY missing", 0
 
-    params = {
-        "model": model,
-        "smart_format": str(boolish(options.get("smart_format"), True)).lower(),
-        "punctuate": str(boolish(options.get("punctuate"), True)).lower(),
-        "diarize": str(boolish(options.get("diarize"), False)).lower(),
-        "paragraphs": str(boolish(options.get("paragraphs"), False)).lower(),
-        "numerals": str(boolish(options.get("numerals"), False)).lower(),
-        "profanity_filter": str(boolish(options.get("profanity_filter"), False)).lower(),
-    }
+    defaults = deepgram_model_defaults(model)
+    params = {"model": model}
+    for k, v in defaults.items():
+        params[k] = str(boolish(options.get(k), v == "true")).lower()
     utt_split = options.get("utterance_split")
     try:
         if utt_split is not None and str(utt_split).strip() != "":
@@ -901,12 +944,22 @@ def transcribe_with_deepgram(seg_file: Path, model: str, language: str, options:
     except Exception:
         pass
 
+    keywords = options.get("keywords")
+    if isinstance(keywords, list) and keywords:
+        cleaned = [str(x).strip() for x in keywords if str(x).strip()]
+        if cleaned:
+            params["keywords"] = cleaned
+
     if language == "auto":
         params["detect_language"] = "true"
     else:
         params["language"] = language
 
-    headers = {"Authorization": f"Token {Config.DEEPGRAM_API_KEY}"}
+    headers = {
+        "Authorization": f"Token {Config.DEEPGRAM_API_KEY}",
+        # Deepgram 预录音频接口支持直接发送音频二进制，显式声明类型更稳妥。
+        "Content-Type": "audio/wav",
+    }
 
     with open(seg_file, "rb") as f:
         resp = SESSION.post(
@@ -942,7 +995,10 @@ def transcribe_with_hf(seg_file: Path) -> Tuple[bool, str, str, int]:
     if not Config.HF_TOKEN:
         return False, "", "HF_TOKEN missing", 0
 
-    headers = {"Authorization": f"Bearer {Config.HF_TOKEN}"}
+    headers = {
+        "Authorization": f"Bearer {Config.HF_TOKEN}",
+        "Content-Type": "audio/wav",
+    }
     params = {"wait_for_model": "true"}
     with open(seg_file, "rb") as f:
         resp = SESSION.post(
@@ -994,6 +1050,8 @@ def transcribe_task(
 
     if is_cancel_requested(job_id):
         return SegmentResult(False, idx, seg.start, seg.end, "", "CANCELLED")
+    if seg.dur < 0.01:
+        return SegmentResult(False, idx, seg.start, seg.end, "", "INVALID_SEGMENT_DURATION")
 
     try:
         extract_segment_wav(full_wav, seg_file, seg.start, seg.end)
@@ -1004,7 +1062,7 @@ def transcribe_task(
             ok, txt, err, code = transcribe_with_deepgram(seg_file, model, language, options)
 
         if ok:
-            txt = normalize_transcript_text(txt, language)
+            txt = normalize_transcript_text(txt, language, model=model)
             if not txt:
                 return SegmentResult(False, idx, seg.start, seg.end, "", "EMPTY_AFTER_NORMALIZE", code)
             return SegmentResult(True, idx, seg.start, seg.end, txt, None, code)
@@ -1019,13 +1077,13 @@ def transcribe_task(
         safe_unlink(seg_file)
 
 
-def build_srt(results: List[SegmentResult], language: str) -> str:
+def build_srt(results: List[SegmentResult], language: str, model: str = "") -> str:
     # 结果按时间排序
     results = sorted([r for r in results if r.ok and r.text], key=lambda x: (x.start, x.end, x.idx))
 
     cues: List[Tuple[float, float, str]] = []
     for r in results:
-        lines = split_text_for_srt(r.text, language=language)
+        lines = split_text_for_srt(r.text, language=language, model=model)
         parts = allocate_line_times(r.start, r.end, lines)
         cues.extend(parts)
 
@@ -1042,8 +1100,18 @@ def build_srt(results: List[SegmentResult], language: str) -> str:
         final_cues.append((s, e, txt))
         prev_end = e
 
+    # 合并紧邻且文本相同的 cue，避免视觉上“抖动”式分裂。
+    compact_cues: List[Tuple[float, float, str]] = []
+    for s, e, txt in final_cues:
+        if compact_cues:
+            ps, pe, ptxt = compact_cues[-1]
+            if txt == ptxt and s - pe <= 0.12:
+                compact_cues[-1] = (ps, max(pe, e), ptxt)
+                continue
+        compact_cues.append((s, e, txt))
+
     lines_out: List[str] = []
-    for i, (s, e, txt) in enumerate(final_cues, 1):
+    for i, (s, e, txt) in enumerate(compact_cues, 1):
         lines_out.append(f"{i}\n{srt_ts(s)} --> {srt_ts(e)}\n{txt}\n")
 
     return "\n".join(lines_out).strip() + "\n"
@@ -1158,7 +1226,7 @@ def process_job(job_id: str) -> None:
         if fail_count > 0:
             append_log(job_id, f"ℹ️ 部分片段失败: {fail_count} 段，已自动跳过")
 
-        srt = build_srt(results, language=language)
+        srt = build_srt(results, language=language, model=model)
         out_path = OUTPUTS_ROOT / f"{job_id}.srt"
         atomic_write_text(out_path, srt)
 
