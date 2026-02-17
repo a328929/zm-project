@@ -23,14 +23,13 @@
 
   const optPunctuate = $("optPunctuate");
   const optSmartFormat = $("optSmartFormat");
-  const optDiarize = $("optDiarize");
-  const optParagraphs = $("optParagraphs");
-  const optNumerals = $("optNumerals");
-  const optProfanity = $("optProfanity");
   const optUtteranceSplit = $("optUtteranceSplit");
+  const optVadProfile = $("optVadProfile");
+  const optVadNoiseDb = $("optVadNoiseDb");
   const apiTokenInput = $("apiTokenInput");
 
   const LS_KEY = "zmv6_ui_pref";
+  const ALLOWED_VAD_PROFILES = ["balanced", "general", "asmr"];
 
   let pollTimer = null;
   let currentJobId = null;
@@ -51,6 +50,11 @@
       fileHint: "支持 mp3/wav/m4a/mp4 等，后端会自动处理",
       advSummary: "官方参数调节 (高级)",
       labelUttSplit: "语音停顿检测 (秒)",
+      uttSplitDesc: "控制切段灵敏度：小=切更碎；大=更连贯。建议通用 0.45~0.7，ASMR 0.7~1.2。",
+      labelVadProfile: "活动语音分段模式",
+      vadProfileDesc: "balanced/general 适合通用音频；asmr 更保留耳语细节。",
+      labelVadNoise: "VAD 噪声阈值 (dB)",
+      vadNoiseDesc: "范围 -70~-10。更低更保留弱语音；更高更偏强过滤。",
       startBtn: "开始识别并生成 SRT",
       cancelBtn: "取消当前任务",
       progTitle: "识别进度",
@@ -74,6 +78,7 @@
       cancelSent: "🛑 取消请求已发送",
       cancelFailed: "取消失败：",
       uttSplitInvalid: "utterance_split 必须在 0.1 到 5 之间",
+      vadNoiseInvalid: "vad_noise_db 必须在 -70 到 -10 之间",
       authTip: "此服务启用了接口鉴权，请填写访问令牌",
       statusErr: "状态查询失败："
     },
@@ -90,6 +95,11 @@
       fileHint: "Supports mp3/wav/m4a/mp4 and more.",
       advSummary: "Official Parameters (Advanced)",
       labelUttSplit: "Silence Threshold (sec)",
+      uttSplitDesc: "Segmentation sensitivity: lower=more splits, higher=more continuity. General 0.45~0.7, ASMR 0.7~1.2.",
+      labelVadProfile: "VAD Profile",
+      vadProfileDesc: "balanced/general for typical audio; asmr preserves low-energy whisper details.",
+      labelVadNoise: "VAD Noise Threshold (dB)",
+      vadNoiseDesc: "Range -70~-10. Lower keeps weak speech, higher filters more aggressively.",
       startBtn: "Start Transcription",
       cancelBtn: "Cancel Current Job",
       progTitle: "Progress",
@@ -113,6 +123,7 @@
       cancelSent: "🛑 Cancel request sent",
       cancelFailed: "Cancel failed: ",
       uttSplitInvalid: "utterance_split must be between 0.1 and 5",
+      vadNoiseInvalid: "vad_noise_db must be between -70 and -10",
       authTip: "This service requires API token",
       statusErr: "Status query failed: "
     },
@@ -129,6 +140,11 @@
       fileHint: "mp3/wav/m4a/mp4 などに対応",
       advSummary: "詳細パラメータ (Advanced)",
       labelUttSplit: "音声停止検出 (秒)",
+      uttSplitDesc: "分割感度：小さいほど細かく分割、大きいほど連続。一般 0.45~0.7、ASMR 0.7~1.2 推奨。",
+      labelVadProfile: "VADプロファイル",
+      vadProfileDesc: "balanced/general は汎用向け、asmr は低音量ささやき保持向け。",
+      labelVadNoise: "VADノイズ閾値 (dB)",
+      vadNoiseDesc: "範囲 -70~-10。低いほど弱い音声を残しやすく、高いほど強く除去。",
       startBtn: "認識開始してSRTを生成",
       cancelBtn: "現在のジョブを中止",
       progTitle: "進捗状況",
@@ -152,6 +168,7 @@
       cancelSent: "🛑 キャンセル要求を送信しました",
       cancelFailed: "キャンセル失敗: ",
       uttSplitInvalid: "utterance_split は 0.1〜5 の範囲で指定してください",
+      vadNoiseInvalid: "vad_noise_db は -70〜-10 の範囲で指定してください",
       authTip: "このサービスは API トークン認証が有効です",
       statusErr: "ステータス取得失敗: "
     }
@@ -168,7 +185,7 @@
   }
 
   function applyI18n() {
-    ["title", "subtitle", "cfgTitle", "langLabel", "langHint", "modelLabel", "modelHint", "fileLabel", "dropText", "fileHint", "advSummary", "labelUttSplit", "startBtn", "cancelBtn", "progTitle", "balTitle", "projectLabel", "projectHint", "checkBalanceBtn"].forEach((k) => setText(k, k));
+    ["title", "subtitle", "cfgTitle", "langLabel", "langHint", "modelLabel", "modelHint", "fileLabel", "dropText", "fileHint", "advSummary", "labelUttSplit", "uttSplitDesc", "labelVadProfile", "vadProfileDesc", "labelVadNoise", "vadNoiseDesc", "startBtn", "cancelBtn", "progTitle", "balTitle", "projectLabel", "projectHint", "checkBalanceBtn"].forEach((k) => setText(k, k));
     downloadBtn.textContent = t("downloadBtn");
     updateNoticeForModel();
   }
@@ -227,14 +244,19 @@
       throw new Error(t("uttSplitInvalid"));
     }
 
+    let vadNoise = Number(optVadNoiseDb.value || -35);
+    if (!Number.isFinite(vadNoise) || vadNoise < -70 || vadNoise > -10) {
+      throw new Error(t("vadNoiseInvalid"));
+    }
+
+    const vadProfile = (optVadProfile.value || "balanced").trim().toLowerCase();
+
     return {
       smart_format: !!optSmartFormat.checked,
       punctuate: !!optPunctuate.checked,
-      diarize: !!optDiarize.checked,
-      paragraphs: !!optParagraphs.checked,
-      numerals: !!optNumerals.checked,
-      profanity_filter: !!optProfanity.checked,
-      utterance_split: Number(utt.toFixed(2))
+      utterance_split: Number(utt.toFixed(2)),
+      vad_profile: ALLOWED_VAD_PROFILES.includes(vadProfile) ? vadProfile : "balanced",
+      vad_noise_db: Number(vadNoise.toFixed(1))
     };
   }
 
@@ -246,11 +268,9 @@
       opt: {
         punctuate: !!optPunctuate.checked,
         smart_format: !!optSmartFormat.checked,
-        diarize: !!optDiarize.checked,
-        paragraphs: !!optParagraphs.checked,
-        numerals: !!optNumerals.checked,
-        profanity_filter: !!optProfanity.checked,
-        utterance_split: Number(optUtteranceSplit.value || 0.5)
+        utterance_split: Number(optUtteranceSplit.value || 0.5),
+        vad_profile: (optVadProfile.value || "balanced"),
+        vad_noise_db: Number(optVadNoiseDb.value || -35)
       }
     };
     try { localStorage.setItem(LS_KEY, JSON.stringify(pref)); } catch (_) {}
@@ -268,13 +288,56 @@
     if (pref.opt) {
       optPunctuate.checked = !!pref.opt.punctuate;
       optSmartFormat.checked = !!pref.opt.smart_format;
-      optDiarize.checked = !!pref.opt.diarize;
-      optParagraphs.checked = !!pref.opt.paragraphs;
-      optNumerals.checked = !!pref.opt.numerals;
-      optProfanity.checked = !!pref.opt.profanity_filter;
       if (Number.isFinite(Number(pref.opt.utterance_split))) {
         optUtteranceSplit.value = String(pref.opt.utterance_split);
       }
+      if (typeof pref.opt.vad_profile === "string") {
+        const pv = String(pref.opt.vad_profile).toLowerCase();
+        optVadProfile.value = ALLOWED_VAD_PROFILES.includes(pv) ? pv : "balanced";
+      }
+      if (Number.isFinite(Number(pref.opt.vad_noise_db))) {
+        optVadNoiseDb.value = String(pref.opt.vad_noise_db);
+      }
+    }
+  }
+
+  async function loadServerConfig() {
+    try {
+      const res = await fetch("/api/config", { headers: getAuthHeaders() });
+      const data = await res.json();
+      if (!res.ok || !data.ok) return;
+
+      const vd = data.vad_defaults || {};
+      const minSilence = Number(vd.min_silence);
+      if (Number.isFinite(minSilence)) {
+        optUtteranceSplit.value = String(minSilence);
+      }
+
+      const noiseDb = Number(vd.noise_db);
+      if (Number.isFinite(noiseDb)) {
+        optVadNoiseDb.value = String(noiseDb);
+      }
+
+      const profile = String(vd.profile || "").toLowerCase();
+      if (ALLOWED_VAD_PROFILES.includes(profile)) {
+        optVadProfile.value = profile;
+      }
+
+      const profiles = Array.isArray(vd.profiles) ? vd.profiles.map((x) => String(x).toLowerCase()) : [];
+      if (profiles.length > 0) {
+        const current = optVadProfile.value;
+        optVadProfile.innerHTML = "";
+        profiles.forEach((p) => {
+          if (!ALLOWED_VAD_PROFILES.includes(p)) return;
+          const op = document.createElement("option");
+          op.value = p;
+          op.textContent = p === "balanced" ? "balanced（默认）" : (p === "general" ? "general（通用强化）" : "asmr（耳语保留）");
+          optVadProfile.appendChild(op);
+        });
+        if ([...optVadProfile.options].some((x) => x.value === current)) optVadProfile.value = current;
+      }
+    } catch (_) {
+      // ignore; keep local defaults
     }
   }
 
@@ -479,7 +542,7 @@
   langSelect.addEventListener("change", persistPref);
   fileInput.addEventListener("change", updatePickedFile);
 
-  [optPunctuate, optSmartFormat, optDiarize, optParagraphs, optNumerals, optProfanity, optUtteranceSplit].forEach((el) => {
+  [optPunctuate, optSmartFormat, optUtteranceSplit, optVadProfile, optVadNoiseDb].forEach((el) => {
     el.addEventListener("change", persistPref);
   });
 
@@ -489,6 +552,7 @@
 
   // 初始化语言
   restorePref();
+  loadServerConfig().finally(() => persistPref());
   if (!uiLang.value) {
     const navLang = (navigator.language || "").toLowerCase();
     if (navLang.startsWith("en")) uiLang.value = "en";

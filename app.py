@@ -136,6 +136,8 @@ class Config:
     MAX_SEGMENT_SECONDS = _env_float("MAX_SEGMENT_SECONDS", 15.0, minimum=5.0, maximum=30.0)
     MIN_SEGMENT_SECONDS = _env_float("MIN_SEGMENT_SECONDS", 0.25, minimum=0.1, maximum=2.0)
     VAD_MIN_SILENCE_DEFAULT = _env_float("VAD_MIN_SILENCE_DEFAULT", 0.5, minimum=0.1, maximum=3.0)
+    VAD_NOISE_DB_DEFAULT = _env_float("VAD_NOISE_DB_DEFAULT", -35.0, minimum=-70.0, maximum=-10.0)
+    VAD_PROFILE_DEFAULT = _env_str("VAD_PROFILE_DEFAULT", "balanced").lower()
 
     # 元数据写盘节流
     META_FLUSH_INTERVAL_SECONDS = _env_float("META_FLUSH_INTERVAL_SECONDS", 0.8, minimum=0.2, maximum=5.0)
@@ -640,7 +642,32 @@ def _parse_silence(stderr: str) -> Tuple[List[float], List[float]]:
     return starts, ends
 
 
-def detect_speech_segments(wav_path: Path, min_silence: float) -> Tuple[List[SpeechSeg], float, int]:
+def _vad_filter_chain(min_silence: float, noise_db: float, profile: str) -> str:
+    """
+    参考 ffmpeg silencedetect/agate 参数语义：
+    - ASMR: 更保留弱语音，尽量减少门限抑制；
+    - balanced/general: 适度频带约束 + 轻门限，提升通用场景鲁棒性。
+    """
+    p = (profile or "balanced").lower()
+    noise_db = clamp(float(noise_db), -70.0, -10.0)
+    min_silence = clamp(float(min_silence), 0.1, 5.0)
+
+    if p == "asmr":
+        # 保留耳语与低能量细节，避免 agate 误杀。
+        return (
+            "highpass=f=50,lowpass=f=9000,"
+            f"silencedetect=noise={noise_db:.1f}dB:d={min_silence:.2f}"
+        )
+
+    # balanced/general
+    return (
+        "highpass=f=300,lowpass=f=3000,"
+        "agate=threshold=-30dB:range=0:attack=50:release=200,"
+        f"silencedetect=noise={noise_db:.1f}dB:d={min_silence:.2f}"
+    )
+
+
+def detect_speech_segments(wav_path: Path, min_silence: float, noise_db: float, profile: str) -> Tuple[List[SpeechSeg], float, int]:
     """
     返回: (segments, total_duration, split_count)
     """
@@ -648,11 +675,7 @@ def detect_speech_segments(wav_path: Path, min_silence: float) -> Tuple[List[Spe
     if total_dur <= 0.05:
         return [], 0.0, 0
 
-    filter_chain = (
-        f"highpass=f=300,lowpass=f=3000,"
-        f"agate=threshold=-30dB:range=0:attack=50:release=200,"
-        f"silencedetect=noise=-35dB:d={min_silence:.2f}"
-    )
+    filter_chain = _vad_filter_chain(min_silence=min_silence, noise_db=noise_db, profile=profile)
 
     proc = subprocess.run(
         ["ffmpeg", "-hide_banner", "-i", str(wav_path), "-af", filter_chain, "-f", "null", "-"],
@@ -661,6 +684,10 @@ def detect_speech_segments(wav_path: Path, min_silence: float) -> Tuple[List[Spe
         text=True,
         timeout=480,
     )
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip().replace("\n", " ")[:220]
+        raise RuntimeError(f"VAD_FFMPEG_ERR: {err or 'unknown ffmpeg error'}")
+
     starts, ends = _parse_silence(proc.stderr or "")
 
     # 由静音区间反推出语音区间（并做容错）
@@ -1162,7 +1189,22 @@ def process_job(job_id: str) -> None:
         except Exception:
             min_silence = Config.VAD_MIN_SILENCE_DEFAULT
 
-        segments, total_dur, split_count = detect_speech_segments(wav, min_silence=min_silence)
+        vad_noise_raw = options.get("vad_noise_db", Config.VAD_NOISE_DB_DEFAULT)
+        try:
+            vad_noise_db = clamp(float(vad_noise_raw), -70.0, -10.0)
+        except Exception:
+            vad_noise_db = Config.VAD_NOISE_DB_DEFAULT
+
+        vad_profile = str(options.get("vad_profile", Config.VAD_PROFILE_DEFAULT) or "balanced").strip().lower()
+        if vad_profile not in {"balanced", "general", "asmr"}:
+            vad_profile = "balanced"
+
+        segments, total_dur, split_count = detect_speech_segments(
+            wav,
+            min_silence=min_silence,
+            noise_db=vad_noise_db,
+            profile=vad_profile,
+        )
         touch_heartbeat(job_id)
         if not segments:
             raise RuntimeError("未检测到有效语音片段")
@@ -1171,7 +1213,7 @@ def process_job(job_id: str) -> None:
         ratio = (speech_sum / total_dur * 100.0) if total_dur > 0 else 0.0
         append_log(
             job_id,
-            f"🎙️ VAD 完成: {len(segments)} 段 | 分裂 {split_count} 次 | 有声占比 {ratio:.1f}%",
+            f"🎙️ VAD 完成: {len(segments)} 段 | 分裂 {split_count} 次 | 有声占比 {ratio:.1f}% | profile={vad_profile} noise={vad_noise_db:.1f}dB silence={min_silence:.2f}s",
         )
         set_progress(job_id, 14)
 
@@ -1389,6 +1431,12 @@ def api_config():
             "default_model": Config.DEFAULT_MODEL,
             "supported_lang": sorted(Config.SUPPORTED_LANG),
             "supported_models": sorted(Config.SUPPORTED_MODELS),
+            "vad_defaults": {
+                "profile": Config.VAD_PROFILE_DEFAULT,
+                "noise_db": Config.VAD_NOISE_DB_DEFAULT,
+                "min_silence": Config.VAD_MIN_SILENCE_DEFAULT,
+                "profiles": ["balanced", "general", "asmr"],
+            },
             "auth_enabled": bool(Config.API_AUTH_TOKEN),
         }
     )

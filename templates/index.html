@@ -66,13 +66,28 @@
         <div class="adv-grid">
           <label><input type="checkbox" id="optPunctuate" checked> 自动标点 (punctuate)</label>
           <label><input type="checkbox" id="optSmartFormat" checked> 智能格式 (smart_format)</label>
-          <label><input type="checkbox" id="optDiarize"> 说话人识别 (diarize)</label>
-          <label><input type="checkbox" id="optParagraphs"> 自动段落 (paragraphs)</label>
-          <label><input type="checkbox" id="optNumerals"> 数字转换 (numerals)</label>
-          <label><input type="checkbox" id="optProfanity"> 过滤脏话 (profanity)</label>
 
-          <label for="optUtteranceSplit" id="labelUttSplit">语音停顿检测 (秒)</label>
-          <input id="optUtteranceSplit" type="number" min="0.1" max="5" step="0.1" placeholder="0.5" value="0.5">
+          <div class="adv-item">
+            <label for="optUtteranceSplit" id="labelUttSplit">语音停顿检测 (utterance_split, 秒)</label>
+            <small id="uttSplitDesc">控制切段灵敏度。小=切更碎；大=更连贯。建议通用 0.45~0.7，ASMR 0.7~1.2。</small>
+            <input id="optUtteranceSplit" type="number" min="0.1" max="5" step="0.1" placeholder="0.5" value="0.5">
+          </div>
+
+          <div class="adv-item">
+            <label for="optVadProfile" id="labelVadProfile">活动语音分段模式 (vad_profile)</label>
+            <small id="vadProfileDesc">balanced/general 适合通用音频；asmr 会尽量保留低能量耳语细节。</small>
+            <select id="optVadProfile">
+              <option value="balanced">balanced（默认）</option>
+              <option value="general">general（通用强化）</option>
+              <option value="asmr">asmr（耳语保留）</option>
+            </select>
+          </div>
+
+          <div class="adv-item">
+            <label for="optVadNoiseDb" id="labelVadNoise">VAD 噪声阈值 (vad_noise_db, dB)</label>
+            <small id="vadNoiseDesc">范围 -70 ~ -10。更低（如 -45）更容易保留弱语音，更高（如 -30）更偏强过滤。</small>
+            <input id="optVadNoiseDb" type="number" min="-70" max="-10" step="1" placeholder="-35" value="-35">
+          </div>
 
           {% if auth_enabled %}
           <label for="apiTokenInput" id="apiTokenLabel">API 访问令牌</label>
