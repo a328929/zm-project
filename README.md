@@ -108,6 +108,8 @@ docker compose up -d --build
 | `DOWNLOAD_GRACE_SECONDS` | 下载后宽限秒数 | `60` |
 | `SECURE_DELETE_PASSES` | 删除覆盖轮次 | `0` |
 | `API_AUTH_TOKEN` | 接口鉴权令牌（可选） | 空 |
+| `VAD_CPU_THREADS` | Silero VAD CPU 线程数 | `CPU核数` |
+| `ENABLE_ONNX_VAD` | 启用 ONNX Runtime 加速 | `1` |
 
 ---
 
@@ -130,6 +132,21 @@ docker compose up -d --build
 
 ### Q3: 如何提升吞吐？
 - 提高 `CONCURRENCY`（片段并发）和 `JOB_WORKERS`（任务并发），同时提升机器 CPU/带宽。
+
+### Q4: 改了 `.env` 并 `docker compose restart`，为什么还是旧密钥或 401？
+- 常见原因是容器创建时注入的环境变量与 `.env` 文件不一致；本项目应用启动时会使用 `.env` 覆盖进程环境。
+- 若你只更新了 `env_file` 而没有挂载 `.env` 文件，建议执行 `docker compose up -d --force-recreate` 让容器环境重建。
+- 可用 `GET /api/config` 检查当前是否读取到预期模型与开关配置（敏感密钥不会回显）。
+- 若提示 `HTTP 413` 且响应来自 `openresty/nginx`，说明请求在反向代理层被拦截；请提高代理的 `client_max_body_size`（例如 `200m`）。
+
+---
+
+## VAD 性能调优
+
+- 默认会使用 `VAD_CPU_THREADS=CPU核数`，并优先尝试 ONNX Runtime（官方推荐的 CPU 加速路径）。
+- 可在 `.env` 里显式设置 `VAD_CPU_THREADS`（例如 16/32）并保持 `ENABLE_ONNX_VAD=1`。
+- 如果你的机器 CPU 核数多但系统负载高，可把 `CONCURRENCY` 调低一点，给 VAD 阶段留出更多 CPU。
+- 若长音频出现“有声占比异常偏低”（如 3%），服务会自动二次放宽 VAD 参数做补救，并与 `vad_preset`（general/asmr/mixed）联动采用不同放宽幅度；可通过 `VAD_LOW_SPEECH_RATIO` 与 `VAD_RELAX_MIN_AUDIO_SECONDS` 调整触发条件。
 
 ---
 

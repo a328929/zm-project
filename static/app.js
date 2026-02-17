@@ -36,6 +36,7 @@
   let currentJobId = null;
   let since = 0;
   let startBalance = null;
+  let serverMaxUploadMb = null;
 
   const i18n = {
     zh: {
@@ -87,7 +88,9 @@
       vadMinSpeechInvalid: "vad_min_speech_ms 必须在 50 到 3000 之间",
       vadSpeechPadInvalid: "vad_speech_pad_ms 必须在 0 到 1000 之间",
       authTip: "此服务启用了接口鉴权，请填写访问令牌",
-      statusErr: "状态查询失败："
+      statusErr: "状态查询失败：",
+      fileTooLargeClient: "文件过大：当前文件 ${size}MB，服务端上限 ${limit}MB。",
+      fileTooLargeProxy413: "上传被网关/反向代理拒绝（HTTP 413）。请提高 Nginx/OpenResty 的 client_max_body_size，或减小文件大小。"
     },
     en: {
       title: "Ultra-Stable STT Studio",
@@ -138,7 +141,9 @@
       vadMinSpeechInvalid: "vad_min_speech_ms must be between 50 and 3000",
       vadSpeechPadInvalid: "vad_speech_pad_ms must be between 0 and 1000",
       authTip: "This service requires API token",
-      statusErr: "Status query failed: "
+      statusErr: "Status query failed: ",
+      fileTooLargeClient: "File too large: ${size}MB, server limit ${limit}MB.",
+      fileTooLargeProxy413: "Upload rejected by gateway/reverse proxy (HTTP 413). Increase client_max_body_size in Nginx/OpenResty or reduce file size."
     },
     ja: {
       title: "極簡音声認識字幕工房",
@@ -189,7 +194,9 @@
       vadMinSpeechInvalid: "vad_min_speech_ms は 50〜3000 の範囲で指定してください",
       vadSpeechPadInvalid: "vad_speech_pad_ms は 0〜1000 の範囲で指定してください",
       authTip: "このサービスは API トークン認証が有効です",
-      statusErr: "ステータス取得失敗: "
+      statusErr: "ステータス取得失敗: ",
+      fileTooLargeClient: "ファイルが大きすぎます: 現在 ${size}MB、上限 ${limit}MB。",
+      fileTooLargeProxy413: "アップロードがゲートウェイ/リバースプロキシに拒否されました（HTTP 413）。Nginx/OpenResty の client_max_body_size を引き上げるか、ファイルを小さくしてください。"
     }
   };
 
@@ -255,6 +262,25 @@
     const token = (apiTokenInput && apiTokenInput.value || "").trim();
     if (!token) return {};
     return { "X-API-Token": token };
+  }
+
+  async function parseApiResponse(res) {
+    const raw = await res.text();
+    if (!raw) return {};
+
+    try {
+      return JSON.parse(raw);
+    } catch (_) {
+      if (res.status === 413) {
+        throw new Error(t("fileTooLargeProxy413"));
+      }
+      const compact = raw
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 160);
+      throw new Error(`服务器返回了非 JSON 响应 (HTTP ${res.status})${compact ? `: ${compact}` : ""}`);
+    }
   }
 
   function collectOptions() {
@@ -343,8 +369,10 @@
   async function loadServerConfig() {
     try {
       const res = await fetch("/api/config", { headers: getAuthHeaders() });
-      const data = await res.json();
+      const data = await parseApiResponse(res);
       if (!res.ok || !data.ok) return;
+
+      if (Number.isFinite(Number(data.max_upload_mb))) serverMaxUploadMb = Number(data.max_upload_mb);
 
       const vd = data.vad_defaults || {};
 
@@ -384,7 +412,7 @@
   async function getFastBalance() {
     try {
       const r = await fetch("/api/balance", { headers: getAuthHeaders() });
-      const d = await r.json();
+      const d = await parseApiResponse(r);
       return d.ok ? Number(d.total) : null;
     } catch (_) {
       return null;
@@ -396,6 +424,14 @@
     if (!f) {
       addLog("⚠️ " + t("noFile"));
       return;
+    }
+
+    if (Number.isFinite(serverMaxUploadMb) && serverMaxUploadMb > 0) {
+      const sizeMb = f.size / 1024 / 1024;
+      if (sizeMb > serverMaxUploadMb) {
+        addLog("❌ " + t("fileTooLargeClient").replace("${size}", sizeMb.toFixed(2)).replace("${limit}", String(serverMaxUploadMb)));
+        return;
+      }
     }
 
     clearStateForNewJob();
@@ -422,7 +458,7 @@
 
     try {
       const res = await fetch("/api/start", { method: "POST", body: fd, headers: getAuthHeaders() });
-      const data = await res.json();
+      const data = await parseApiResponse(res);
       if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
 
       currentJobId = data.job_id;
@@ -441,7 +477,7 @@
         method: "POST",
         headers: getAuthHeaders()
       });
-      const data = await res.json();
+      const data = await parseApiResponse(res);
       if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
       addLog(t("cancelSent"));
     } catch (err) {
@@ -455,7 +491,7 @@
       const res = await fetch(`/api/status/${encodeURIComponent(currentJobId)}?since=${since}`, {
         headers: getAuthHeaders()
       });
-      const data = await res.json();
+      const data = await parseApiResponse(res);
       if (!res.ok || !data.ok) {
         addLog("❌ " + t("statusErr") + (data.error || res.statusText));
         stopPolling();
@@ -527,7 +563,7 @@
 
     try {
       const res = await fetch(url, { headers: getAuthHeaders() });
-      const data = await res.json();
+      const data = await parseApiResponse(res);
       if (!res.ok || !data.ok) {
         balanceBox.textContent = `❌ ${data.error || res.statusText}`;
         return;
