@@ -108,6 +108,8 @@ docker compose up -d --build
 | `DOWNLOAD_GRACE_SECONDS` | 下载后宽限秒数 | `60` |
 | `SECURE_DELETE_PASSES` | 删除覆盖轮次 | `0` |
 | `API_AUTH_TOKEN` | 接口鉴权令牌（可选） | 空 |
+| `VAD_CPU_THREADS` | Silero VAD CPU 线程数 | `CPU核数` |
+| `ENABLE_ONNX_VAD` | 启用 ONNX Runtime 加速 | `1` |
 
 ---
 
@@ -130,6 +132,11 @@ docker compose up -d --build
 
 ### Q3: 如何提升吞吐？
 - 提高 `CONCURRENCY`（片段并发）和 `JOB_WORKERS`（任务并发），同时提升机器 CPU/带宽。
+
+### Q4: Silero VAD 太慢怎么调？
+- 现在默认会使用 `VAD_CPU_THREADS=CPU核数`，并优先尝试 ONNX Runtime（官方推荐的 CPU 加速路径）。
+- 可在 `.env` 里显式设置 `VAD_CPU_THREADS`（例如 16/32）并保持 `ENABLE_ONNX_VAD=1`。
+- 如果你的机器 CPU 核数多但系统负载高，可把 `CONCURRENCY` 调低一点，给 VAD 阶段留出更多 CPU。
 
 ---
 
