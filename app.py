@@ -27,6 +27,7 @@ import time
 import traceback
 import uuid
 import wave
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -200,6 +201,8 @@ META_DIRTY_LOCK = threading.RLock()
 
 JOB_QUEUE: "queue.Queue[str]" = queue.Queue()
 SHUTDOWN = threading.Event()
+
+EMPTY_SEGMENT_ERRORS = {"EMPTY_TRANSCRIPT", "EMPTY_AFTER_NORMALIZE", "HF_EMPTY_TRANSCRIPT"}
 
 SESSION = requests.Session()
 retries = Retry(
@@ -1057,8 +1060,6 @@ def allocate_line_times(seg_start: float, seg_end: float, lines: List[str]) -> L
     return fixed
 
 
-
-
 def deepgram_model_defaults(model: str) -> Dict[str, str]:
     """
     基于官方可用参数做保守默认值：
@@ -1188,6 +1189,13 @@ class SegmentResult:
     code: int = 0
 
 
+def _empty_retry_window(seg: SpeechSeg) -> Tuple[float, float]:
+    pad = 0.22 if seg.dur < 1.2 else (0.35 if seg.dur < 3.0 else 0.50)
+    retry_start = max(0.0, seg.start - pad)
+    retry_end = max(retry_start + 0.02, seg.end + pad)
+    return retry_start, retry_end
+
+
 def transcribe_task(
     job_id: str,
     idx: int,
@@ -1213,13 +1221,13 @@ def transcribe_task(
             ok, txt, err, code = transcribe_with_hf(seg_file)
         else:
             ok, txt, err, code = transcribe_with_deepgram(seg_file, model, language, options)
-            # 对短片段的 EMPTY_TRANSCRIPT 做一次温和重试（扩窗），降低误空结果。
-            if (not ok) and err == "EMPTY_TRANSCRIPT" and seg.dur < 1.2:
-                pad = 0.22
-                retry_start = max(0.0, seg.start - pad)
-                retry_end = max(retry_start + 0.02, seg.end + pad)
+            # 对 EMPTY_TRANSCRIPT 做更稳健重试：扩窗 +（若指定语言）自动语言兜底。
+            if (not ok) and err == "EMPTY_TRANSCRIPT":
+                retry_start, retry_end = _empty_retry_window(seg)
                 extract_segment_wav(full_wav, seg_file, retry_start, retry_end)
-                ok, txt, err, code = transcribe_with_deepgram(seg_file, model, language, options)
+
+                retry_lang = "auto" if language != "auto" else language
+                ok, txt, err, code = transcribe_with_deepgram(seg_file, model, retry_lang, options)
 
         if ok:
             txt = normalize_transcript_text(txt, language, model=model)
@@ -1361,6 +1369,7 @@ def process_job(job_id: str) -> None:
 
         results: List[SegmentResult] = []
         fail_count = 0
+        empty_count = 0
         total = len(segments)
 
         with ThreadPoolExecutor(max_workers=Config.CONCURRENCY) as executor:
@@ -1387,9 +1396,12 @@ def process_job(job_id: str) -> None:
                 if r.ok:
                     results.append(r)
                 else:
-                    fail_count += 1
-                    if r.error and r.error not in {"CANCELLED"}:
-                        append_log(job_id, f"⚠️ 片段#{r.idx} 失败: {r.error}")
+                    if r.error in EMPTY_SEGMENT_ERRORS:
+                        empty_count += 1
+                    else:
+                        fail_count += 1
+                        if r.error and r.error not in {"CANCELLED"}:
+                            append_log(job_id, f"⚠️ 片段#{r.idx} 失败: {r.error}")
 
                 p = 14 + (80 * done / max(1, total))
                 set_progress(job_id, p)
@@ -1400,7 +1412,10 @@ def process_job(job_id: str) -> None:
             return
 
         if not results:
-            raise RuntimeError(f"转录全量失败（失败段: {fail_count}）")
+            raise RuntimeError(f"转录全量失败（失败段: {fail_count + empty_count}）")
+
+        if empty_count > 0:
+            append_log(job_id, f"ℹ️ 空转写片段: {empty_count} 段（多为静音/呼吸/噪声），已自动忽略")
 
         if fail_count > 0:
             append_log(job_id, f"ℹ️ 部分片段失败: {fail_count} 段，已自动跳过")
@@ -1424,10 +1439,6 @@ def process_job(job_id: str) -> None:
         secure_rmtree(TMP_ROOT / job_id)
         release_job_lease(job_id)
         mark_meta_dirty(job_id)
-
-
-# ThreadPoolExecutor / as_completed 延后导入，避免上面注释阅读跳转噪音
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # -----------------------------
