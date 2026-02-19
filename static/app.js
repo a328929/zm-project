@@ -28,6 +28,8 @@
   const optVadMinSilenceMs = $("optVadMinSilenceMs");
   const optVadMinSpeechMs = $("optVadMinSpeechMs");
   const optVadSpeechPadMs = $("optVadSpeechPadMs");
+  const optMinTranscribeSegSec = $("optMinTranscribeSegSec");
+  const optShortSegMergeGapSec = $("optShortSegMergeGapSec");
   const apiTokenInput = $("apiTokenInput");
 
   const LS_KEY = "zmv6_ui_pref";
@@ -61,6 +63,10 @@
       vadMinSpeechDesc: "范围 50~3000。过滤瞬时噪声。",
       labelVadSpeechPad: "语音边界补偿 (ms)",
       vadSpeechPadDesc: "范围 0~1000。为首尾补上下文。",
+      labelMinTranscribeSegSec: "最小转写片段时长 (s)",
+      minTranscribeSegSecDesc: "范围 0.2~2.0。过短片段更容易空转写。",
+      labelShortSegMergeGapSec: "短片段合并间隙 (s)",
+      shortSegMergeGapSecDesc: "范围 0~1.0。越大越倾向合并相邻短片段。",
       startBtn: "开始识别并生成 SRT",
       cancelBtn: "取消当前任务",
       progTitle: "识别进度",
@@ -87,6 +93,8 @@
       vadMinSilenceInvalid: "vad_min_silence_ms 必须在 50 到 3000 之间",
       vadMinSpeechInvalid: "vad_min_speech_ms 必须在 50 到 3000 之间",
       vadSpeechPadInvalid: "vad_speech_pad_ms 必须在 0 到 1000 之间",
+      minTranscribeSegSecInvalid: "min_transcribe_segment_seconds 必须在 0.2 到 2.0 之间",
+      shortSegMergeGapSecInvalid: "short_segment_merge_gap_seconds 必须在 0 到 1.0 之间",
       authTip: "此服务启用了接口鉴权，请填写访问令牌",
       statusErr: "状态查询失败：",
       fileTooLargeClient: "文件过大：当前文件 ${size}MB，服务端上限 ${limit}MB。",
@@ -114,6 +122,10 @@
       vadMinSpeechDesc: "Range 50~3000. Filters impulsive noise-like fragments.",
       labelVadSpeechPad: "Speech Padding (ms)",
       vadSpeechPadDesc: "Range 0~1000. Adds context around speech boundaries.",
+      labelMinTranscribeSegSec: "Min Transcribe Segment (s)",
+      minTranscribeSegSecDesc: "Range 0.2~2.0. Very short segments are more likely to be empty.",
+      labelShortSegMergeGapSec: "Short Segment Merge Gap (s)",
+      shortSegMergeGapSecDesc: "Range 0~1.0. Higher values merge nearby short segments more aggressively.",
       startBtn: "Start Transcription",
       cancelBtn: "Cancel Current Job",
       progTitle: "Progress",
@@ -140,6 +152,8 @@
       vadMinSilenceInvalid: "vad_min_silence_ms must be between 50 and 3000",
       vadMinSpeechInvalid: "vad_min_speech_ms must be between 50 and 3000",
       vadSpeechPadInvalid: "vad_speech_pad_ms must be between 0 and 1000",
+      minTranscribeSegSecInvalid: "min_transcribe_segment_seconds must be between 0.2 and 2.0",
+      shortSegMergeGapSecInvalid: "short_segment_merge_gap_seconds must be between 0 and 1.0",
       authTip: "This service requires API token",
       statusErr: "Status query failed: ",
       fileTooLargeClient: "File too large: ${size}MB, server limit ${limit}MB.",
@@ -167,6 +181,10 @@
       vadMinSpeechDesc: "範囲 50~3000。瞬間ノイズ片を除去。",
       labelVadSpeechPad: "音声境界パディング (ms)",
       vadSpeechPadDesc: "範囲 0~1000。前後に文脈を追加。",
+      labelMinTranscribeSegSec: "最小文字起こし区間 (s)",
+      minTranscribeSegSecDesc: "範囲 0.2~2.0。短すぎる区間は空文字になりやすい。",
+      labelShortSegMergeGapSec: "短区間マージ間隔 (s)",
+      shortSegMergeGapSecDesc: "範囲 0~1.0。大きいほど近接した短区間を結合しやすい。",
       startBtn: "認識開始してSRTを生成",
       cancelBtn: "現在のジョブを中止",
       progTitle: "進捗状況",
@@ -193,6 +211,8 @@
       vadMinSilenceInvalid: "vad_min_silence_ms は 50〜3000 の範囲で指定してください",
       vadMinSpeechInvalid: "vad_min_speech_ms は 50〜3000 の範囲で指定してください",
       vadSpeechPadInvalid: "vad_speech_pad_ms は 0〜1000 の範囲で指定してください",
+      minTranscribeSegSecInvalid: "min_transcribe_segment_seconds は 0.2〜2.0 の範囲で指定してください",
+      shortSegMergeGapSecInvalid: "short_segment_merge_gap_seconds は 0〜1.0 の範囲で指定してください",
       authTip: "このサービスは API トークン認証が有効です",
       statusErr: "ステータス取得失敗: ",
       fileTooLargeClient: "ファイルが大きすぎます: 現在 ${size}MB、上限 ${limit}MB。",
@@ -211,7 +231,7 @@
   }
 
   function applyI18n() {
-    ["title", "subtitle", "cfgTitle", "langLabel", "langHint", "modelLabel", "modelHint", "fileLabel", "dropText", "fileHint", "advSummary", "labelVadPreset", "vadPresetDesc", "labelVadThreshold", "vadThresholdDesc", "labelVadMinSilence", "vadMinSilenceDesc", "labelVadMinSpeech", "vadMinSpeechDesc", "labelVadSpeechPad", "vadSpeechPadDesc", "startBtn", "cancelBtn", "progTitle", "balTitle", "projectLabel", "projectHint", "checkBalanceBtn"].forEach((k) => setText(k, k));
+    ["title", "subtitle", "cfgTitle", "langLabel", "langHint", "modelLabel", "modelHint", "fileLabel", "dropText", "fileHint", "advSummary", "labelVadPreset", "vadPresetDesc", "labelVadThreshold", "vadThresholdDesc", "labelVadMinSilence", "vadMinSilenceDesc", "labelVadMinSpeech", "vadMinSpeechDesc", "labelVadSpeechPad", "vadSpeechPadDesc", "labelMinTranscribeSegSec", "minTranscribeSegSecDesc", "labelShortSegMergeGapSec", "shortSegMergeGapSecDesc", "startBtn", "cancelBtn", "progTitle", "balTitle", "projectLabel", "projectHint", "checkBalanceBtn"].forEach((k) => setText(k, k));
     downloadBtn.textContent = t("downloadBtn");
     updateNoticeForModel();
   }
@@ -301,6 +321,16 @@
       throw new Error(t("vadSpeechPadInvalid"));
     }
 
+    const minTranscribeSegSec = Number(optMinTranscribeSegSec.value || 0.45);
+    if (!Number.isFinite(minTranscribeSegSec) || minTranscribeSegSec < 0.2 || minTranscribeSegSec > 2.0) {
+      throw new Error(t("minTranscribeSegSecInvalid"));
+    }
+
+    const shortSegMergeGapSec = Number(optShortSegMergeGapSec.value || 0.2);
+    if (!Number.isFinite(shortSegMergeGapSec) || shortSegMergeGapSec < 0 || shortSegMergeGapSec > 1.0) {
+      throw new Error(t("shortSegMergeGapSecInvalid"));
+    }
+
     const preset = (optVadPreset.value || "general").trim().toLowerCase();
 
     return {
@@ -310,7 +340,9 @@
       vad_threshold: Number(threshold.toFixed(2)),
       vad_min_silence_ms: Math.round(minSilence),
       vad_min_speech_ms: Math.round(minSpeech),
-      vad_speech_pad_ms: Math.round(speechPad)
+      vad_speech_pad_ms: Math.round(speechPad),
+      min_transcribe_segment_seconds: Number(minTranscribeSegSec.toFixed(2)),
+      short_segment_merge_gap_seconds: Number(shortSegMergeGapSec.toFixed(2))
     };
   }
 
@@ -326,7 +358,9 @@
         vad_threshold: Number(optVadThreshold.value || 0.5),
         vad_min_silence_ms: Number(optVadMinSilenceMs.value || 400),
         vad_min_speech_ms: Number(optVadMinSpeechMs.value || 220),
-        vad_speech_pad_ms: Number(optVadSpeechPadMs.value || 120)
+        vad_speech_pad_ms: Number(optVadSpeechPadMs.value || 120),
+        min_transcribe_segment_seconds: Number(optMinTranscribeSegSec.value || 0.45),
+        short_segment_merge_gap_seconds: Number(optShortSegMergeGapSec.value || 0.2)
       }
     };
     try { localStorage.setItem(LS_KEY, JSON.stringify(pref)); } catch (_) {}
@@ -360,7 +394,38 @@
       if (Number.isFinite(Number(pref.opt.vad_speech_pad_ms))) {
         optVadSpeechPadMs.value = String(pref.opt.vad_speech_pad_ms);
       }
+      if (Number.isFinite(Number(pref.opt.min_transcribe_segment_seconds))) {
+        optMinTranscribeSegSec.value = String(pref.opt.min_transcribe_segment_seconds);
+      }
+      if (Number.isFinite(Number(pref.opt.short_segment_merge_gap_seconds))) {
+        optShortSegMergeGapSec.value = String(pref.opt.short_segment_merge_gap_seconds);
+      }
     }
+  }
+
+  function setSelectOptions(selectEl, values, formatter) {
+    if (!selectEl || !Array.isArray(values) || values.length === 0) return;
+    const current = selectEl.value;
+    selectEl.innerHTML = "";
+    values.forEach((value) => {
+      const op = document.createElement("option");
+      op.value = value;
+      op.textContent = formatter ? formatter(value) : String(value);
+      selectEl.appendChild(op);
+    });
+    if ([...selectEl.options].some((x) => x.value === current)) {
+      selectEl.value = current;
+    }
+  }
+
+  function langOptionLabel(value) {
+    const map = {
+      auto: "自动判断 (auto)",
+      zh: "中文 (zh)",
+      en: "English (en)",
+      ja: "日本語 (ja)"
+    };
+    return map[value] || `${value} (${value})`;
   }
 
   async function loadServerConfig() {
@@ -370,6 +435,19 @@
       if (!res.ok || !data.ok) return;
 
       if (Number.isFinite(Number(data.max_upload_mb))) serverMaxUploadMb = Number(data.max_upload_mb);
+
+      const serverLang = Array.isArray(data.supported_lang) ? data.supported_lang : [];
+      setSelectOptions(langSelect, serverLang, langOptionLabel);
+
+      const serverModels = Array.isArray(data.supported_models) ? data.supported_models : [];
+      setSelectOptions(modelSelect, serverModels, (m) => m === data.default_model ? `${m} (default)` : m);
+      if (
+        data.default_model
+        && [...modelSelect.options].some((x) => x.value === data.default_model)
+        && ![...modelSelect.options].some((x) => x.value === modelSelect.value)
+      ) {
+        modelSelect.value = data.default_model;
+      }
 
       const vd = data.vad_defaults || {};
 
@@ -401,6 +479,12 @@
 
       const speechPad = Number(vd.vad_speech_pad_ms);
       if (Number.isFinite(speechPad)) optVadSpeechPadMs.value = String(speechPad);
+
+      const minTranscribe = Number(vd.min_transcribe_segment_seconds);
+      if (Number.isFinite(minTranscribe)) optMinTranscribeSegSec.value = String(minTranscribe);
+
+      const mergeGap = Number(vd.short_segment_merge_gap_seconds);
+      if (Number.isFinite(mergeGap)) optShortSegMergeGapSec.value = String(mergeGap);
     } catch (_) {
       // ignore; keep local defaults
     }
@@ -615,7 +699,7 @@
   langSelect.addEventListener("change", persistPref);
   fileInput.addEventListener("change", updatePickedFile);
 
-  [optPunctuate, optSmartFormat, optVadPreset, optVadThreshold, optVadMinSilenceMs, optVadMinSpeechMs, optVadSpeechPadMs].forEach((el) => {
+  [optPunctuate, optSmartFormat, optVadPreset, optVadThreshold, optVadMinSilenceMs, optVadMinSpeechMs, optVadSpeechPadMs, optMinTranscribeSegSec, optShortSegMergeGapSec].forEach((el) => {
     el.addEventListener("change", persistPref);
   });
 

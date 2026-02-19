@@ -17,10 +17,8 @@ import html
 import json
 import os
 import queue
-import random
 import re
 import shutil
-import string
 import subprocess
 import threading
 import time
@@ -30,7 +28,7 @@ import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import torch
@@ -821,16 +819,14 @@ def detect_speech_segments(wav_path: Path, vad_options: Dict[str, Any]) -> Tuple
     speech_pad_ms = int(clamp(float(vad_options.get("vad_speech_pad_ms", Config.SILERO_SPEECH_PAD_MS)), 0, 1000))
 
     wav_tensor = load_audio_16k_mono_for_vad(wav_path)
-    with torch.inference_mode():
-        speech_ts = get_speech_timestamps(
-            wav_tensor,
-            SILERO_MODEL,
-            threshold=threshold,
-            sampling_rate=16000,
-            min_speech_duration_ms=min_speech_ms,
-            min_silence_duration_ms=min_silence_ms,
-            speech_pad_ms=speech_pad_ms,
-        )
+    pairs = _silero_pairs_from_tensor(
+        wav_tensor,
+        total_dur,
+        threshold,
+        min_silence_ms,
+        min_speech_ms,
+        speech_pad_ms,
+    )
 
     relaxed_threshold, relaxed_min_silence, relaxed_min_speech, relaxed_pad, relaxed = _maybe_relax_vad_options(
         pairs,
