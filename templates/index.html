@@ -101,6 +101,18 @@
             <input id="optVadSpeechPadMs" type="number" min="0" max="1000" step="10" placeholder="120" value="120">
           </div>
 
+          <div class="adv-item">
+            <label for="optMinTranscribeSegSec" id="labelMinTranscribeSegSec">最小转写片段时长 (min_transcribe_segment_seconds)</label>
+            <small id="minTranscribeSegSecDesc">范围 0.2~2.0 秒。过短片段易返回空文本，适当提高可提升稳定性。</small>
+            <input id="optMinTranscribeSegSec" type="number" min="0.2" max="2.0" step="0.05" placeholder="0.45" value="0.45">
+          </div>
+
+          <div class="adv-item">
+            <label for="optShortSegMergeGapSec" id="labelShortSegMergeGapSec">短片段合并间隙 (short_segment_merge_gap_seconds)</label>
+            <small id="shortSegMergeGapSecDesc">范围 0~1.0 秒。越大越倾向将相邻短片段合并后再转写。</small>
+            <input id="optShortSegMergeGapSec" type="number" min="0" max="1.0" step="0.05" placeholder="0.2" value="0.2">
+          </div>
+
           {% if auth_enabled %}
           <label for="apiTokenInput" id="apiTokenLabel">API 访问令牌</label>
           <input id="apiTokenInput" type="password" autocomplete="off" placeholder="输入 API_AUTH_TOKEN 后可调用接口">
