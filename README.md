@@ -1,6 +1,6 @@
 # 极简语音识别字幕工坊 ZMv6
 
-高稳定、可维护、可扩展的音视频转 SRT 项目。基于 Flask + FFmpeg + Deepgram/HF。
+高稳定、可维护、可扩展的音视频转 SRT 项目。基于 Flask + FFmpeg + Deepgram/SiliconFlow。
 
 > 本版本是对 `zmv5` 的兼容升级版，保留原有核心 API 路径与主要环境变量，重点优化稳定性、字幕质量、可运维性。
 
@@ -61,7 +61,7 @@
 
 ```bash
 cp .env.example .env
-# 编辑 .env，至少填 DEEPGRAM_API_KEY
+# 编辑 .env，至少填 DEEPGRAM_API_KEY（使用 SenseVoiceSmall 时需填 SILICONFLOW_API_KEY）
 ```
 
 ### 2) Docker 启动
@@ -98,6 +98,9 @@ docker compose up -d --build
 |---|---|---|
 | `DEEPGRAM_API_KEY` | Deepgram Key | 空 |
 | `DEEPGRAM_BASE_URL` | Deepgram API Base | `https://api.deepgram.com/v1` |
+| `SILICONFLOW_API_KEY` | SiliconFlow Key（SenseVoiceSmall） | 空 |
+| `SILICONFLOW_BASE_URL` | SiliconFlow API Base | `https://api.siliconflow.cn/v1` |
+| `SENSEVOICE_MODEL_ID` | SiliconFlow ASR 模型 ID | `FunAudioLLM/SenseVoiceSmall` |
 | `DEFAULT_MODEL` | 默认模型 | `nova-2-general` |
 | `CONCURRENCY` | 片段并发数 | `20` |
 | `JOB_WORKERS` | 同时执行任务数 | `1` |
@@ -139,6 +142,7 @@ docker compose up -d --build
 - 常见原因是容器创建时注入的环境变量与 `.env` 文件不一致；本项目已改为应用启动时使用 `.env` 覆盖进程环境。
 - 若你只更新了 `env_file` 而没有挂载 `.env` 文件，建议执行 `docker compose up -d --force-recreate` 让容器环境重建。
 - 可用 `GET /api/config` 检查当前是否读取到预期模型与开关配置（敏感密钥不会回显）。
+- 若选择 `FunAudioLLM/SenseVoiceSmall`，服务会通过 SiliconFlow `/audio/transcriptions` 接口转写，并兼容 `text/transcript/segments` 等常见响应结构。
 
 ---
 

@@ -44,9 +44,9 @@
             <option value="nova-2-general" {{ 'selected' if default_model == 'nova-2-general' else '' }}>nova-2-general (default)</option>
             <option value="nova-3-general" {{ 'selected' if default_model == 'nova-3-general' else '' }}>nova-3-general</option>
             <option value="whisper-large" {{ 'selected' if default_model == 'whisper-large' else '' }}>whisper-large</option>
-            <option value="{{ model_jp }}" {{ 'selected' if default_model == model_jp else '' }}>{{ model_jp }}</option>
+            <option value="{{ model_sensevoice }}" {{ 'selected' if default_model == model_sensevoice else '' }}>{{ model_sensevoice }}</option>
           </select>
-          <small id="modelHint">默认：nova-2-general（通用）；另含 nova-3-general、whisper-large、日语专精模型</small>
+          <small id="modelHint">默认：nova-2-general（通用）；另含 nova-3-general、whisper-large、SenseVoiceSmall</small>
         </div>
       </div>
 
