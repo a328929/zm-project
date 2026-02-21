@@ -145,6 +145,8 @@ class Config:
     SILERO_MIN_SILENCE_MS = _env_int("SILERO_MIN_SILENCE_MS", 400, minimum=50, maximum=3000)
     SILERO_MIN_SPEECH_MS = _env_int("SILERO_MIN_SPEECH_MS", 220, minimum=50, maximum=3000)
     SILERO_SPEECH_PAD_MS = _env_int("SILERO_SPEECH_PAD_MS", 120, minimum=0, maximum=1000)
+    VAD_RELAX_MIN_AUDIO_SECONDS = _env_float("VAD_RELAX_MIN_AUDIO_SECONDS", 20.0, minimum=1.0, maximum=600.0)
+    VAD_LOW_SPEECH_RATIO = _env_float("VAD_LOW_SPEECH_RATIO", 0.12, minimum=0.01, maximum=0.95)
     VAD_PRESET_DEFAULT = _env_str("VAD_PRESET_DEFAULT", "general").lower()
     VAD_CPU_THREADS = _env_int("VAD_CPU_THREADS", os.cpu_count() or 1, minimum=1, maximum=256)
     VAD_INTEROP_THREADS = _env_int("VAD_INTEROP_THREADS", 1, minimum=1, maximum=64)
@@ -789,7 +791,9 @@ def _maybe_relax_vad_options(
     preset: str,
 ) -> Tuple[float, int, int, int, bool]:
     ratio = _speech_ratio(pairs, total_dur)
-    should_relax = total_dur >= Config.VAD_RELAX_MIN_AUDIO_SECONDS and ratio < Config.VAD_LOW_SPEECH_RATIO
+    min_audio_sec = float(getattr(Config, "VAD_RELAX_MIN_AUDIO_SECONDS", 20.0))
+    low_speech_ratio = float(getattr(Config, "VAD_LOW_SPEECH_RATIO", 0.12))
+    should_relax = total_dur >= min_audio_sec and ratio < low_speech_ratio
     if not should_relax:
         return threshold, min_silence_ms, min_speech_ms, speech_pad_ms, False
 
@@ -1550,6 +1554,11 @@ def process_job(job_id: str) -> None:
     language = payload.get("language", "auto")
     options = payload.get("options") or {}
 
+    effective_language = language
+    if is_siliconflow_model(model) and language != "auto":
+        append_log(job_id, f"ℹ️ SenseVoice 模型启用自动语种识别，已忽略请求语言 {language}，改为 auto")
+        effective_language = "auto"
+
     if not file_path.exists():
         set_error(job_id, "上传文件不存在或已被清理")
         append_log(job_id, "❌ 上传文件缺失")
@@ -1563,7 +1572,7 @@ def process_job(job_id: str) -> None:
     try:
         set_status(job_id, "running")
         set_progress(job_id, 1)
-        append_log(job_id, f"🚀 任务启动 | 模型: {model} | 语言: {language}")
+        append_log(job_id, f"🚀 任务启动 | 模型: {model} | 语言: {language} | 实际识别语言: {effective_language}")
 
         wav = TMP_ROOT / job_id / "normalized.wav"
         normalize_to_wav(file_path, wav)
@@ -1637,7 +1646,7 @@ def process_job(job_id: str) -> None:
 
         with ThreadPoolExecutor(max_workers=seg_concurrency) as executor:
             future_map = {
-                executor.submit(transcribe_task, job_id, i, seg, wav, model, language, options): i
+                executor.submit(transcribe_task, job_id, i, seg, wav, model, effective_language, options): i
                 for i, seg in enumerate(segments)
             }
             done = 0
@@ -1852,6 +1861,8 @@ def api_config():
                 "vad_min_silence_ms": Config.SILERO_MIN_SILENCE_MS,
                 "vad_min_speech_ms": Config.SILERO_MIN_SPEECH_MS,
                 "vad_speech_pad_ms": Config.SILERO_SPEECH_PAD_MS,
+                "vad_relax_min_audio_seconds": Config.VAD_RELAX_MIN_AUDIO_SECONDS,
+                "vad_low_speech_ratio": Config.VAD_LOW_SPEECH_RATIO,
                 "vad_preset": Config.VAD_PRESET_DEFAULT if Config.VAD_PRESET_DEFAULT in vad_presets() else "general",
                 "vad_presets": vad_presets(),
                 "min_transcribe_segment_seconds": Config.MIN_TRANSCRIBE_SEGMENT_SECONDS,

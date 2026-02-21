@@ -116,6 +116,8 @@ docker compose up -d --build
 | `API_AUTH_TOKEN` | 接口鉴权令牌（可选） | 空 |
 | `VAD_CPU_THREADS` | Silero VAD CPU 线程数 | `CPU核数` |
 | `ENABLE_ONNX_VAD` | 启用 ONNX Runtime 加速 | `1` |
+| `VAD_RELAX_MIN_AUDIO_SECONDS` | 启用VAD自动放宽的最短音频时长(秒) | `20` |
+| `VAD_LOW_SPEECH_RATIO` | 触发VAD自动放宽的低有声占比阈值 | `0.12` |
 
 ---
 
