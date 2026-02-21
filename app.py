@@ -1357,23 +1357,6 @@ def parse_transcript_payload(data: Any) -> str:
     return max(uniq, key=len)
 
 
-
-
-def clean_sensevoice_text(text: str) -> str:
-    x = str(text or "")
-    if not x:
-        return ""
-
-    # SenseVoice 常见控制标记：<|zh|><|HAPPY|><|Speech|> 等，字幕中应移除。
-    x = re.sub(r"<\|[^|>]+\|>", " ", x)
-
-    # 部分后端会返回事件/情绪括号标签，避免污染字幕正文。
-    x = re.sub(r"\[(?:music|noise|laugh|laughter|applause|breath|emotion|emo)[^\]]*\]", " ", x, flags=re.I)
-    x = re.sub(r"\((?:music|noise|laugh|laughter|applause|breath|emotion|emo)[^\)]*\)", " ", x, flags=re.I)
-
-    return re.sub(r"\s{2,}", " ", x).strip()
-
-
 def transcribe_with_siliconflow(seg_file: Path, language: str) -> Tuple[bool, str, str, int]:
     if not Config.SILICONFLOW_API_KEY:
         return False, "", "SILICONFLOW_API_KEY missing", 0
@@ -1409,7 +1392,7 @@ def transcribe_with_siliconflow(seg_file: Path, language: str) -> Tuple[bool, st
 
     try:
         data = resp.json()
-        txt = clean_sensevoice_text(parse_transcript_payload(data))
+        txt = parse_transcript_payload(data)
         if not txt:
             return False, "", "SILICONFLOW_EMPTY_TRANSCRIPT", status
         return True, txt, "", status
