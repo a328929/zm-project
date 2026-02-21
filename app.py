@@ -87,7 +87,26 @@ def _env_bool(name: str, default: bool = False) -> bool:
 # -----------------------------
 # 配置
 # -----------------------------
-class Config:
+class _ConfigMeta(type):
+    """兼容旧版本字段，避免因单个配置缺失导致任务直接失败。"""
+
+    _COMPAT_DEFAULTS: Dict[str, Any] = {
+        "VAD_RELAX_MIN_AUDIO_SECONDS": 20.0,
+        # 历史版本里出现过拼写/截断不一致，这里统一兜底。
+        "VAD_RELAX_MIN_AUDIO_SEC": 20.0,
+    }
+    _WARNED_MISSING: set[str] = set()
+
+    def __getattr__(cls, name: str) -> Any:
+        if name in cls._COMPAT_DEFAULTS:
+            if name not in cls._WARNED_MISSING:
+                print(f"[WARN] Config.{name} 缺失，使用兼容默认值: {cls._COMPAT_DEFAULTS[name]}")
+                cls._WARNED_MISSING.add(name)
+            return cls._COMPAT_DEFAULTS[name]
+        raise AttributeError(f"type object 'Config' has no attribute '{name}'")
+
+
+class Config(metaclass=_ConfigMeta):
     APP_TITLE = _env_str("APP_TITLE", "极简语音识别字幕工坊")
 
     # 鉴权（可选，为兼容默认关闭）
@@ -1060,6 +1079,32 @@ def extract_segment_wav(full_wav: Path, out_wav: Path, start: float, end: float)
 # -----------------------------
 # 转写与文本质量优化
 # -----------------------------
+def _strip_emoji_and_symbol_marks(text: str) -> str:
+    if not text:
+        return ""
+    # 过滤表情及常见情绪符号，避免字幕出现 😔 / ❤️ / ☹ 等表达性字符。
+    pattern = re.compile(
+        "["
+        "\U0001F1E6-\U0001F1FF"  # flags
+        "\U0001F300-\U0001F5FF"  # symbols & pictographs
+        "\U0001F600-\U0001F64F"  # emoticons
+        "\U0001F680-\U0001F6FF"  # transport/map
+        "\U0001F700-\U0001F77F"  # alchemical symbols
+        "\U0001F780-\U0001F7FF"  # geometric extended
+        "\U0001F800-\U0001F8FF"  # arrows-c
+        "\U0001F900-\U0001F9FF"  # supplemental symbols
+        "\U0001FA00-\U0001FAFF"  # symbols and pictographs extended-a
+        "\U00002700-\U000027BF"  # dingbats
+        "\U00002600-\U000026FF"  # misc symbols
+        "\u200d"                    # zero width joiner
+        "\ufe0f"                    # variation selector-16
+        "]+",
+        flags=re.UNICODE,
+    )
+    cleaned = pattern.sub("", text)
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
 def normalize_transcript_text(text: str, language: str = "auto", model: str = "") -> str:
     if not text:
         return ""
@@ -1080,6 +1125,8 @@ def normalize_transcript_text(text: str, language: str = "auto", model: str = ""
 
     # 降噪：大量重复标点折叠
     x = re.sub(r"([!?！？。.,，])\1{2,}", r"\1\1", x)
+
+    x = _strip_emoji_and_symbol_marks(x)
 
     model_l = (model or "").lower()
 
@@ -1555,9 +1602,6 @@ def process_job(job_id: str) -> None:
     options = payload.get("options") or {}
 
     effective_language = language
-    if is_siliconflow_model(model) and language != "auto":
-        append_log(job_id, f"ℹ️ SenseVoice 模型启用自动语种识别，已忽略请求语言 {language}，改为 auto")
-        effective_language = "auto"
 
     if not file_path.exists():
         set_error(job_id, "上传文件不存在或已被清理")
@@ -1572,7 +1616,7 @@ def process_job(job_id: str) -> None:
     try:
         set_status(job_id, "running")
         set_progress(job_id, 1)
-        append_log(job_id, f"🚀 任务启动 | 模型: {model} | 语言: {language} | 实际识别语言: {effective_language}")
+        append_log(job_id, f"🚀 任务启动 | 模型: {model} | 语言: {effective_language}")
 
         wav = TMP_ROOT / job_id / "normalized.wav"
         normalize_to_wav(file_path, wav)
