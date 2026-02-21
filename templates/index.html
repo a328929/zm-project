@@ -67,6 +67,16 @@
           <label><input type="checkbox" id="optPunctuate" checked> 自动标点 (punctuate)</label>
           <label><input type="checkbox" id="optSmartFormat" checked> 智能格式 (smart_format)</label>
 
+
+          <div class="adv-item">
+            <label for="optAudioProfile" id="labelAudioProfile">音频处理策略 (audio_profile)</label>
+            <small id="audioProfileDesc">standard=当前稳定方案；high_quality=高保真优先识别细节。</small>
+            <select id="optAudioProfile">
+              <option value="standard">standard（标准）</option>
+              <option value="high_quality">high_quality（高保真）</option>
+            </select>
+          </div>
+
           <div class="adv-item">
             <label for="optVadPreset" id="labelVadPreset">VAD 预设方案 (vad_preset)</label>
             <small id="vadPresetDesc">general=通用；asmr=低能量耳语；mixed=混合素材折中。可继续自定义下方细项。</small>

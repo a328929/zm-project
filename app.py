@@ -87,7 +87,26 @@ def _env_bool(name: str, default: bool = False) -> bool:
 # -----------------------------
 # 配置
 # -----------------------------
-class Config:
+class _ConfigMeta(type):
+    """兼容旧版本字段，避免因单个配置缺失导致任务直接失败。"""
+
+    _COMPAT_DEFAULTS: Dict[str, Any] = {
+        "VAD_RELAX_MIN_AUDIO_SECONDS": 20.0,
+        # 历史版本里出现过拼写/截断不一致，这里统一兜底。
+        "VAD_RELAX_MIN_AUDIO_SEC": 20.0,
+    }
+    _WARNED_MISSING: set[str] = set()
+
+    def __getattr__(cls, name: str) -> Any:
+        if name in cls._COMPAT_DEFAULTS:
+            if name not in cls._WARNED_MISSING:
+                print(f"[WARN] Config.{name} 缺失，使用兼容默认值: {cls._COMPAT_DEFAULTS[name]}")
+                cls._WARNED_MISSING.add(name)
+            return cls._COMPAT_DEFAULTS[name]
+        raise AttributeError(f"type object 'Config' has no attribute '{name}'")
+
+
+class Config(metaclass=_ConfigMeta):
     APP_TITLE = _env_str("APP_TITLE", "极简语音识别字幕工坊")
 
     # 鉴权（可选，为兼容默认关闭）
@@ -151,6 +170,9 @@ class Config:
     VAD_CPU_THREADS = _env_int("VAD_CPU_THREADS", os.cpu_count() or 1, minimum=1, maximum=256)
     VAD_INTEROP_THREADS = _env_int("VAD_INTEROP_THREADS", 1, minimum=1, maximum=64)
     ENABLE_ONNX_VAD = _env_bool("ENABLE_ONNX_VAD", True)
+
+    # 音频处理策略（standard=当前稳定方案, high_quality=高保真）
+    AUDIO_PROFILE_DEFAULT = _env_str("AUDIO_PROFILE_DEFAULT", "standard").strip().lower()
 
     # 元数据写盘节流
     META_FLUSH_INTERVAL_SECONDS = _env_float("META_FLUSH_INTERVAL_SECONDS", 0.8, minimum=0.2, maximum=5.0)
@@ -460,8 +482,9 @@ def ffprobe_duration(path: Path) -> float:
     return float(out)
 
 
-def normalize_to_wav(input_path: Path, output_wav: Path) -> None:
+def normalize_to_wav(input_path: Path, output_wav: Path, sample_rate: int = 16000) -> None:
     ensure_parent(output_wav)
+    sr = int(clamp(float(sample_rate), 8000, 48000))
     run_cmd(
         [
             "ffmpeg",
@@ -475,7 +498,7 @@ def normalize_to_wav(input_path: Path, output_wav: Path) -> None:
             "-ac",
             "1",
             "-ar",
-            "16000",
+            str(sr),
             "-c:a",
             "pcm_s16le",
             str(output_wav),
@@ -909,32 +932,52 @@ def detect_speech_segments(wav_path: Path, vad_options: Dict[str, Any]) -> Tuple
     return out, total_dur, split_count
 
 
+def audio_profiles() -> Dict[str, Dict[str, Any]]:
+    return {
+        "standard": {
+            "label": "标准（当前稳定方案）",
+            "desc": "16k + 动态归一化，兼顾速度与稳定性（默认）。",
+            "normalize_sample_rate": 16000,
+            "segment_sample_rate": 16000,
+            "segment_audio_filter": "dynaudnorm=p=0.9:s=5",
+        },
+        "high_quality": {
+            "label": "高保真（优先识别细节）",
+            "desc": "48k 保留更多频率细节，分段不做动态归一化，适合清晰慢语速与高质量音源。",
+            "normalize_sample_rate": 48000,
+            "segment_sample_rate": 48000,
+            "segment_audio_filter": "",
+        },
+    }
+
+
 def vad_presets() -> Dict[str, Dict[str, Any]]:
     # 三套场景预设：通用 / ASMR / 混合
+    # 结合慢语速中文与弱音场景，适度提高边界补偿，避免截断首尾音节。
     return {
         "general": {
             "label": "通用（会议/视频/播客）",
-            "vad_threshold": 0.55,
-            "vad_min_silence_ms": 420,
-            "vad_min_speech_ms": 240,
-            "vad_speech_pad_ms": 110,
-            "desc": "抑制碎段，适合普通语速与背景噪声。",
+            "vad_threshold": 0.50,
+            "vad_min_silence_ms": 380,
+            "vad_min_speech_ms": 180,
+            "vad_speech_pad_ms": 170,
+            "desc": "兼顾召回与误检，适合普通中文/英文语音。",
         },
         "asmr": {
             "label": "ASMR（低能量耳语）",
-            "vad_threshold": 0.35,
-            "vad_min_silence_ms": 300,
-            "vad_min_speech_ms": 140,
-            "vad_speech_pad_ms": 180,
-            "desc": "提高弱语音召回，减少耳语漏检。",
+            "vad_threshold": 0.30,
+            "vad_min_silence_ms": 260,
+            "vad_min_speech_ms": 110,
+            "vad_speech_pad_ms": 220,
+            "desc": "增强低能量语音召回，尽量避免耳语漏检。",
         },
         "mixed": {
             "label": "混合（ASMR + 通用）",
-            "vad_threshold": 0.45,
-            "vad_min_silence_ms": 360,
-            "vad_min_speech_ms": 180,
-            "vad_speech_pad_ms": 140,
-            "desc": "在召回与误检间折中，适合混合素材。",
+            "vad_threshold": 0.42,
+            "vad_min_silence_ms": 320,
+            "vad_min_speech_ms": 150,
+            "vad_speech_pad_ms": 190,
+            "desc": "混合素材折中方案，稳定性与召回更平衡。",
         },
     }
 
@@ -1024,42 +1067,80 @@ def optimize_segments_for_transcription(
     return out, merged_count, dropped_count
 
 
-def extract_segment_wav(full_wav: Path, out_wav: Path, start: float, end: float) -> None:
+def extract_segment_wav(
+    full_wav: Path,
+    out_wav: Path,
+    start: float,
+    end: float,
+    sample_rate: int = 16000,
+    audio_filter: str = "dynaudnorm=p=0.9:s=5",
+) -> None:
     duration = max(0.0, end - start)
     if duration < 0.01:
         raise ValueError(f"segment too short: start={start:.6f}, end={end:.6f}")
 
+    sr = int(clamp(float(sample_rate), 8000, 48000))
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(full_wav),
+        "-ss",
+        f"{start:.3f}",
+        "-t",
+        f"{duration:.3f}",
+    ]
+    af = (audio_filter or "").strip()
+    if af:
+        cmd.extend(["-af", af])
+
+    cmd.extend([
+        "-ac",
+        "1",
+        "-ar",
+        str(sr),
+        "-c:a",
+        "pcm_s16le",
+        str(out_wav),
+    ])
+
     ensure_parent(out_wav)
-    run_cmd(
-        [
-            "ffmpeg",
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            str(full_wav),
-            "-ss",
-            f"{start:.3f}",
-            "-t",
-            f"{duration:.3f}",
-            "-af",
-            "dynaudnorm=p=0.9:s=5",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-c:a",
-            "pcm_s16le",
-            str(out_wav),
-        ],
-        timeout=180,
-    )
+    run_cmd(cmd, timeout=180)
 
 
 # -----------------------------
 # 转写与文本质量优化
 # -----------------------------
+def _strip_emoji_and_symbol_marks(text: str) -> str:
+    if not text:
+        return ""
+    # 过滤表情及常见情绪符号，避免字幕出现 😔 / ❤️ / ☹ 等表达性字符。
+    pattern = re.compile(
+        "["
+        "\U0001F1E6-\U0001F1FF"  # flags
+        "\U0001F300-\U0001F5FF"  # symbols & pictographs
+        "\U0001F600-\U0001F64F"  # emoticons
+        "\U0001F680-\U0001F6FF"  # transport/map
+        "\U0001F700-\U0001F77F"  # alchemical symbols
+        "\U0001F780-\U0001F7FF"  # geometric extended
+        "\U0001F800-\U0001F8FF"  # arrows-c
+        "\U0001F900-\U0001F9FF"  # supplemental symbols
+        "\U0001FA00-\U0001FAFF"  # symbols and pictographs extended-a
+        "\U00002700-\U000027BF"  # dingbats
+        "\U00002600-\U000026FF"  # misc symbols
+        "\u200d"                    # zero width joiner
+        "\ufe0f"                    # variation selector-16
+        "]+",
+        flags=re.UNICODE,
+    )
+    cleaned = pattern.sub("", text)
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
 def normalize_transcript_text(text: str, language: str = "auto", model: str = "") -> str:
     if not text:
         return ""
@@ -1080,6 +1161,8 @@ def normalize_transcript_text(text: str, language: str = "auto", model: str = ""
 
     # 降噪：大量重复标点折叠
     x = re.sub(r"([!?！？。.,，])\1{2,}", r"\1\1", x)
+
+    x = _strip_emoji_and_symbol_marks(x)
 
     model_l = (model or "").lower()
 
@@ -1460,40 +1543,42 @@ def transcribe_task(
     if seg.dur < 0.01:
         return SegmentResult(False, idx, seg.start, seg.end, "", "INVALID_SEGMENT_DURATION")
 
+    profile_map = audio_profiles()
+    req_profile = str(options.get("audio_profile", Config.AUDIO_PROFILE_DEFAULT) or Config.AUDIO_PROFILE_DEFAULT).strip().lower()
+    profile = profile_map.get(req_profile, profile_map["standard"])
+    seg_sr = int(profile.get("segment_sample_rate", 16000))
+    seg_af = str(profile.get("segment_audio_filter", "dynaudnorm=p=0.9:s=5"))
+
     try:
-        extract_segment_wav(full_wav, seg_file, seg.start, seg.end)
+        extract_segment_wav(full_wav, seg_file, seg.start, seg.end, sample_rate=seg_sr, audio_filter=seg_af)
 
         if is_siliconflow_model(model):
             ok, txt, err, code = transcribe_with_siliconflow(seg_file, language)
             # 对 SILICONFLOW 空转写做扩窗重试，减少短片段遗漏。
             if (not ok) and err == "SILICONFLOW_EMPTY_TRANSCRIPT":
                 retry_start, retry_end = _empty_retry_window(seg)
-                extract_segment_wav(full_wav, seg_file, retry_start, retry_end)
+                extract_segment_wav(full_wav, seg_file, retry_start, retry_end, sample_rate=seg_sr, audio_filter=seg_af)
                 ok, txt, err, code = transcribe_with_siliconflow(seg_file, language)
         else:
             ok, txt, err, code = transcribe_with_deepgram(seg_file, model, language, options)
             # 对 EMPTY_TRANSCRIPT 做更稳健重试：扩窗 +（若指定语言）自动语言兜底。
             if (not ok) and err == "EMPTY_TRANSCRIPT":
                 retry_start, retry_end = _empty_retry_window(seg)
-                extract_segment_wav(full_wav, seg_file, retry_start, retry_end)
+                extract_segment_wav(full_wav, seg_file, retry_start, retry_end, sample_rate=seg_sr, audio_filter=seg_af)
 
                 retry_lang = "auto" if language != "auto" else language
                 ok, txt, err, code = transcribe_with_deepgram(seg_file, model, retry_lang, options)
 
-        if ok:
-            txt = normalize_transcript_text(txt, language, model=model)
-            if not txt:
-                return SegmentResult(False, idx, seg.start, seg.end, "", "EMPTY_AFTER_NORMALIZE", code)
-            return SegmentResult(True, idx, seg.start, seg.end, txt, None, code)
-        return SegmentResult(False, idx, seg.start, seg.end, "", err or "TRANSCRIBE_FAIL", code)
-    except subprocess.CalledProcessError as e:
-        msg = (e.stderr or e.stdout or str(e))
-        msg = re.sub(r"\s+", " ", msg)[:180]
-        return SegmentResult(False, idx, seg.start, seg.end, "", f"FFMPEG_ERR: {msg}")
+        if not ok:
+            return SegmentResult(False, idx, seg.start, seg.end, "", err or "TRANSCRIBE_FAILED", code=code)
+
+        txt = normalize_transcript_text(txt, language, model=model)
+        if not txt:
+            return SegmentResult(False, idx, seg.start, seg.end, "", "EMPTY_AFTER_NORMALIZE", code=code)
+
+        return SegmentResult(True, idx, seg.start, seg.end, txt, code=code)
     except Exception as e:
-        return SegmentResult(False, idx, seg.start, seg.end, "", f"EXC: {str(e)[:180]}")
-    finally:
-        safe_unlink(seg_file)
+        return SegmentResult(False, idx, seg.start, seg.end, "", f"EXC: {str(e)[:120]}")
 
 
 def build_srt(results: List[SegmentResult], language: str, model: str = "") -> str:
@@ -1554,10 +1639,12 @@ def process_job(job_id: str) -> None:
     language = payload.get("language", "auto")
     options = payload.get("options") or {}
 
+    profile_map = audio_profiles()
+    req_profile = str(options.get("audio_profile", Config.AUDIO_PROFILE_DEFAULT) or Config.AUDIO_PROFILE_DEFAULT).strip().lower()
+    audio_profile = req_profile if req_profile in profile_map else "standard"
+    profile_conf = profile_map[audio_profile]
+
     effective_language = language
-    if is_siliconflow_model(model) and language != "auto":
-        append_log(job_id, f"ℹ️ SenseVoice 模型启用自动语种识别，已忽略请求语言 {language}，改为 auto")
-        effective_language = "auto"
 
     if not file_path.exists():
         set_error(job_id, "上传文件不存在或已被清理")
@@ -1572,10 +1659,13 @@ def process_job(job_id: str) -> None:
     try:
         set_status(job_id, "running")
         set_progress(job_id, 1)
-        append_log(job_id, f"🚀 任务启动 | 模型: {model} | 语言: {language} | 实际识别语言: {effective_language}")
+        append_log(job_id, f"🚀 任务启动 | 模型: {model} | 语言: {effective_language} | 音频策略: {audio_profile}")
 
-        wav = TMP_ROOT / job_id / "normalized.wav"
-        normalize_to_wav(file_path, wav)
+        source_wav = TMP_ROOT / job_id / "normalized_source.wav"
+        normalize_to_wav(file_path, source_wav, sample_rate=int(profile_conf.get("normalize_sample_rate", 16000)))
+
+        wav = TMP_ROOT / job_id / "normalized_vad.wav"
+        normalize_to_wav(source_wav, wav, sample_rate=16000)
         touch_heartbeat(job_id)
         set_progress(job_id, 8)
         append_log(job_id, "✅ 音频标准化完成 (16k/mono/wav)")
@@ -1646,7 +1736,7 @@ def process_job(job_id: str) -> None:
 
         with ThreadPoolExecutor(max_workers=seg_concurrency) as executor:
             future_map = {
-                executor.submit(transcribe_task, job_id, i, seg, wav, model, effective_language, options): i
+                executor.submit(transcribe_task, job_id, i, seg, source_wav, model, effective_language, options): i
                 for i, seg in enumerate(segments)
             }
             done = 0
@@ -1867,6 +1957,10 @@ def api_config():
                 "vad_presets": vad_presets(),
                 "min_transcribe_segment_seconds": Config.MIN_TRANSCRIBE_SEGMENT_SECONDS,
                 "short_segment_merge_gap_seconds": Config.SHORT_SEGMENT_MERGE_GAP_SECONDS,
+            },
+            "audio_defaults": {
+                "profile": Config.AUDIO_PROFILE_DEFAULT if Config.AUDIO_PROFILE_DEFAULT in audio_profiles() else "standard",
+                "profiles": audio_profiles(),
             },
             "auth_enabled": bool(Config.API_AUTH_TOKEN),
         }
