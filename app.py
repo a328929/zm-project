@@ -1361,24 +1361,7 @@ def parse_transcript_payload(data: Any) -> str:
     return max(uniq, key=len)
 
 
-
-
-def clean_sensevoice_text(text: str) -> str:
-    x = str(text or "")
-    if not x:
-        return ""
-
-    # SenseVoice 常见控制标记：<|zh|><|HAPPY|><|Speech|> 等，字幕中应移除。
-    x = re.sub(r"<\|[^|>]+\|>", " ", x)
-
-    # 部分后端会返回事件/情绪括号标签，避免污染字幕正文。
-    x = re.sub(r"\[(?:music|noise|laugh|laughter|applause|breath|emotion|emo)[^\]]*\]", " ", x, flags=re.I)
-    x = re.sub(r"\((?:music|noise|laugh|laughter|applause|breath|emotion|emo)[^\)]*\)", " ", x, flags=re.I)
-
-    return re.sub(r"\s{2,}", " ", x).strip()
-
-
-def transcribe_with_siliconflow(seg_file: Path) -> Tuple[bool, str, str, int]:
+def transcribe_with_siliconflow(seg_file: Path, language: str) -> Tuple[bool, str, str, int]:
     if not Config.SILICONFLOW_API_KEY:
         return False, "", "SILICONFLOW_API_KEY missing", 0
 
@@ -1391,6 +1374,9 @@ def transcribe_with_siliconflow(seg_file: Path) -> Tuple[bool, str, str, int]:
         "model": Config.SENSEVOICE_MODEL_ID,
         "response_format": "verbose_json",
     }
+    if language and language != "auto":
+        form_data["language"] = language
+
     with open(seg_file, "rb") as f:
         files = {
             "file": (seg_file.name, f, "audio/wav"),
@@ -1410,7 +1396,7 @@ def transcribe_with_siliconflow(seg_file: Path) -> Tuple[bool, str, str, int]:
 
     try:
         data = resp.json()
-        txt = clean_sensevoice_text(parse_transcript_payload(data))
+        txt = parse_transcript_payload(data)
         if not txt:
             return False, "", "SILICONFLOW_EMPTY_TRANSCRIPT", status
         return True, txt, "", status
@@ -1478,12 +1464,12 @@ def transcribe_task(
         extract_segment_wav(full_wav, seg_file, seg.start, seg.end)
 
         if is_siliconflow_model(model):
-            ok, txt, err, code = transcribe_with_siliconflow(seg_file)
+            ok, txt, err, code = transcribe_with_siliconflow(seg_file, language)
             # 对 SILICONFLOW 空转写做扩窗重试，减少短片段遗漏。
             if (not ok) and err == "SILICONFLOW_EMPTY_TRANSCRIPT":
                 retry_start, retry_end = _empty_retry_window(seg)
                 extract_segment_wav(full_wav, seg_file, retry_start, retry_end)
-                ok, txt, err, code = transcribe_with_siliconflow(seg_file)
+                ok, txt, err, code = transcribe_with_siliconflow(seg_file, language)
         else:
             ok, txt, err, code = transcribe_with_deepgram(seg_file, model, language, options)
             # 对 EMPTY_TRANSCRIPT 做更稳健重试：扩窗 +（若指定语言）自动语言兜底。

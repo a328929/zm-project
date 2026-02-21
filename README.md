@@ -146,9 +146,6 @@ docker compose up -d --build
 - 若你只更新了 `env_file` 而没有挂载 `.env` 文件，建议执行 `docker compose up -d --force-recreate` 让容器环境重建。
 - 可用 `GET /api/config` 检查当前是否读取到预期模型与开关配置（敏感密钥不会回显）。
 - 若选择 `FunAudioLLM/SenseVoiceSmall`，服务会通过 SiliconFlow `/audio/transcriptions` 接口转写，并兼容 `text/transcript/segments` 等常见响应结构。
-- 若使用免费版 SiliconFlow，建议将 `SILICONFLOW_CONCURRENCY` 设置为 `1~3`，避免 429 限流导致片段重试与字幕缺字。
-- SenseVoice 结果中的控制标签（如 `<|HAPPY|>`、`<|Speech|>` 等）已在服务端清洗，不会写入字幕正文。
-- `FunAudioLLM/SenseVoiceSmall` 默认使用自动语言识别。即使用户提交 `zh/en/ja`，服务端也会强制按 `auto` 调用，并在任务日志中提示。
 
 ---
 
