@@ -93,20 +93,19 @@ class Config:
     # 鉴权（可选，为兼容默认关闭）
     API_AUTH_TOKEN = _env_str("API_AUTH_TOKEN", "")
 
-    # Deepgram / HF
+    # Deepgram / SiliconFlow
     DEEPGRAM_API_KEY = _env_str("DEEPGRAM_API_KEY", "")
     DEEPGRAM_BASE_URL = _env_str("DEEPGRAM_BASE_URL", "https://api.deepgram.com/v1").rstrip("/")
-    HF_TOKEN = _env_str("HF_TOKEN", "")
-    HF_KOTOBA_URL = _env_str(
-        "HF_KOTOBA_URL",
-        "https://api-inference.huggingface.co/models/kotoba-tech/kotoba-whisper-v2.2",
-    )
-    ENABLE_LOCAL_KOTOBA = _env_bool("ENABLE_LOCAL_KOTOBA", False)
+    SILICONFLOW_API_KEY = _env_str("SILICONFLOW_API_KEY", "")
+    SILICONFLOW_BASE_URL = _env_str("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1").rstrip("/")
+    SILICONFLOW_ASR_ENDPOINT = _env_str("SILICONFLOW_ASR_ENDPOINT", "/audio/transcriptions")
+    SENSEVOICE_MODEL_ID = _env_str("SENSEVOICE_MODEL_ID", "FunAudioLLM/SenseVoiceSmall")
 
     # 上传与运行限制
     MAX_UPLOAD_MB = _env_int("MAX_UPLOAD_MB", 4096, minimum=1)
     MAX_CONTENT_LENGTH = MAX_UPLOAD_MB * 1024 * 1024
     CONCURRENCY = _env_int("CONCURRENCY", 20, minimum=1, maximum=64)  # 片段并发
+    SILICONFLOW_CONCURRENCY = _env_int("SILICONFLOW_CONCURRENCY", 2, minimum=1, maximum=16)  # SenseVoice 片段并发上限
     JOB_WORKERS = _env_int("JOB_WORKERS", 1, minimum=1, maximum=8)  # 同时跑几个任务
 
     # 请求与重试
@@ -132,7 +131,7 @@ class Config:
         "nova-2-general",
         "nova-3-general",
         "whisper-large",
-        "kotoba-tech/kotoba-whisper-v2.2",
+        "FunAudioLLM/SenseVoiceSmall",
     }
 
     # 质量调优
@@ -146,6 +145,8 @@ class Config:
     SILERO_MIN_SILENCE_MS = _env_int("SILERO_MIN_SILENCE_MS", 400, minimum=50, maximum=3000)
     SILERO_MIN_SPEECH_MS = _env_int("SILERO_MIN_SPEECH_MS", 220, minimum=50, maximum=3000)
     SILERO_SPEECH_PAD_MS = _env_int("SILERO_SPEECH_PAD_MS", 120, minimum=0, maximum=1000)
+    VAD_RELAX_MIN_AUDIO_SECONDS = _env_float("VAD_RELAX_MIN_AUDIO_SECONDS", 20.0, minimum=1.0, maximum=600.0)
+    VAD_LOW_SPEECH_RATIO = _env_float("VAD_LOW_SPEECH_RATIO", 0.12, minimum=0.01, maximum=0.95)
     VAD_PRESET_DEFAULT = _env_str("VAD_PRESET_DEFAULT", "general").lower()
     VAD_CPU_THREADS = _env_int("VAD_CPU_THREADS", os.cpu_count() or 1, minimum=1, maximum=256)
     VAD_INTEROP_THREADS = _env_int("VAD_INTEROP_THREADS", 1, minimum=1, maximum=64)
@@ -166,7 +167,8 @@ class Config:
     def print_info(cls) -> None:
         print(f"--- [v6.0] {cls.APP_TITLE} 启动中 ---")
         print(
-            f"任务工作线程: {cls.JOB_WORKERS} | 片段并发: {cls.CONCURRENCY} | 上传限制: {cls.MAX_UPLOAD_MB}MB"
+            f"任务工作线程: {cls.JOB_WORKERS} | 片段并发: {cls.CONCURRENCY} | "
+            f"SenseVoice并发上限: {cls.SILICONFLOW_CONCURRENCY} | 上传限制: {cls.MAX_UPLOAD_MB}MB"
         )
         print(
             "清理机制: "
@@ -233,7 +235,7 @@ META_DIRTY_LOCK = threading.RLock()
 JOB_QUEUE: "queue.Queue[str]" = queue.Queue()
 SHUTDOWN = threading.Event()
 
-EMPTY_SEGMENT_ERRORS = {"EMPTY_TRANSCRIPT", "EMPTY_AFTER_NORMALIZE", "HF_EMPTY_TRANSCRIPT"}
+EMPTY_SEGMENT_ERRORS = {"EMPTY_TRANSCRIPT", "EMPTY_AFTER_NORMALIZE", "SILICONFLOW_EMPTY_TRANSCRIPT"}
 
 SESSION = requests.Session()
 retries = Retry(
@@ -280,6 +282,16 @@ def dg_url(path: str) -> str:
     if base.endswith("/v1"):
         base = base[:-3]
     return f"{base}/v1/{path.lstrip('/')}"
+
+
+def sf_url(path: str) -> str:
+    # SiliconFlow 兼容 OpenAI 风格路径，支持用户传全路径/相对路径
+    base = Config.SILICONFLOW_BASE_URL.rstrip("/")
+    return f"{base}/{path.lstrip('/')}"
+
+
+def is_siliconflow_model(model: str) -> bool:
+    return (model or "").strip().lower() == Config.SENSEVOICE_MODEL_ID.lower()
 
 
 def mask_secret(s: str, keep: int = 4) -> str:
@@ -779,7 +791,9 @@ def _maybe_relax_vad_options(
     preset: str,
 ) -> Tuple[float, int, int, int, bool]:
     ratio = _speech_ratio(pairs, total_dur)
-    should_relax = total_dur >= Config.VAD_RELAX_MIN_AUDIO_SECONDS and ratio < Config.VAD_LOW_SPEECH_RATIO
+    min_audio_sec = float(getattr(Config, "VAD_RELAX_MIN_AUDIO_SECONDS", 20.0))
+    low_speech_ratio = float(getattr(Config, "VAD_LOW_SPEECH_RATIO", 0.12))
+    should_relax = total_dur >= min_audio_sec and ratio < low_speech_ratio
     if not should_relax:
         return threshold, min_silence_ms, min_speech_ms, speech_pad_ms, False
 
@@ -1069,8 +1083,8 @@ def normalize_transcript_text(text: str, language: str = "auto", model: str = ""
 
     model_l = (model or "").lower()
 
-    # 若模型输出全部是按字空格（典型 whisper/kotoba 在 CJK 场景异常），再做一次紧缩
-    if language in {"zh", "ja", "auto"} or "whisper" in model_l or "kotoba" in model_l:
+    # 若模型输出全部是按字空格（典型 whisper/sensevoice 在 CJK 场景异常），再做一次紧缩
+    if language in {"zh", "ja", "auto"} or "whisper" in model_l or "sensevoice" in model_l:
         x = re.sub(rf"(?<=[{cjk}])\s+(?=[{cjk}])", "", x)
         x = re.sub(rf"(?<=[{cjk}])\s+(?=[，。！？、；：])", "", x)
         x = re.sub(rf"(?<=[，。！？、；：])\s+(?=[{cjk}])", "", x)
@@ -1107,7 +1121,7 @@ def _char_budget(language: str, model: str = "") -> int:
         return 20
     if language == "zh":
         return 24
-    if language == "auto" and ("kotoba" in model_l or "whisper" in model_l):
+    if language == "auto" and ("sensevoice" in model_l or "whisper" in model_l):
         return 22
     return 42
 
@@ -1293,37 +1307,115 @@ def transcribe_with_deepgram(seg_file: Path, model: str, language: str, options:
         return False, "", "DG_JSON_PARSE_ERR", status
 
 
-def transcribe_with_hf(seg_file: Path) -> Tuple[bool, str, str, int]:
-    if not Config.HF_TOKEN:
-        return False, "", "HF_TOKEN missing", 0
+def _extract_text_candidates(obj: Any, out: List[str]) -> None:
+    if obj is None:
+        return
+    if isinstance(obj, str):
+        t = obj.strip()
+        if t:
+            out.append(t)
+        return
+    if isinstance(obj, list):
+        for item in obj:
+            _extract_text_candidates(item, out)
+        return
+    if isinstance(obj, dict):
+        direct_keys = (
+            "text",
+            "transcript",
+            "sentence",
+            "content",
+            "result",
+            "prediction",
+        )
+        for key in direct_keys:
+            val = obj.get(key)
+            if isinstance(val, str) and val.strip():
+                out.append(val.strip())
 
+        for key in ("segments", "results", "items", "alternatives", "output"):
+            nested = obj.get(key)
+            if nested is not None:
+                _extract_text_candidates(nested, out)
+
+
+def parse_transcript_payload(data: Any) -> str:
+    candidates: List[str] = []
+    _extract_text_candidates(data, candidates)
+
+    uniq: List[str] = []
+    seen = set()
+    for x in candidates:
+        k = x.strip()
+        if not k:
+            continue
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(k)
+
+    if not uniq:
+        return ""
+
+    # 若同时存在整段 text 和逐段 segments，优先使用最长项，避免重复拼接。
+    return max(uniq, key=len)
+
+
+
+
+def clean_sensevoice_text(text: str) -> str:
+    x = str(text or "")
+    if not x:
+        return ""
+
+    # SenseVoice 常见控制标记：<|zh|><|HAPPY|><|Speech|> 等，字幕中应移除。
+    x = re.sub(r"<\|[^|>]+\|>", " ", x)
+
+    # 部分后端会返回事件/情绪括号标签，避免污染字幕正文。
+    x = re.sub(r"\[(?:music|noise|laugh|laughter|applause|breath|emotion|emo)[^\]]*\]", " ", x, flags=re.I)
+    x = re.sub(r"\((?:music|noise|laugh|laughter|applause|breath|emotion|emo)[^\)]*\)", " ", x, flags=re.I)
+
+    return re.sub(r"\s{2,}", " ", x).strip()
+
+
+def transcribe_with_siliconflow(seg_file: Path) -> Tuple[bool, str, str, int]:
+    if not Config.SILICONFLOW_API_KEY:
+        return False, "", "SILICONFLOW_API_KEY missing", 0
+
+    endpoint = Config.SILICONFLOW_ASR_ENDPOINT or "/audio/transcriptions"
     headers = {
-        "Authorization": f"Bearer {Config.HF_TOKEN}",
-        "Content-Type": "audio/wav",
+        "Authorization": f"Bearer {Config.SILICONFLOW_API_KEY}",
     }
-    params = {"wait_for_model": "true"}
+
+    form_data = {
+        "model": Config.SENSEVOICE_MODEL_ID,
+        "response_format": "verbose_json",
+    }
     with open(seg_file, "rb") as f:
+        files = {
+            "file": (seg_file.name, f, "audio/wav"),
+        }
         resp = SESSION.post(
-            Config.HF_KOTOBA_URL,
+            sf_url(endpoint),
             headers=headers,
-            params=params,
-            data=f,
+            data=form_data,
+            files=files,
             timeout=max(120, Config.REQUEST_TIMEOUT_SECONDS),
         )
 
     status = resp.status_code
     if status != 200:
         msg = (resp.text or "")[:180].replace("\n", " ")
-        return False, "", f"HF_ERR_{status}: {msg}", status
+        return False, "", f"SILICONFLOW_ERR_{status}: {msg}", status
 
     try:
         data = resp.json()
-        txt = (data.get("text") or "").strip()
+        txt = clean_sensevoice_text(parse_transcript_payload(data))
         if not txt:
-            return False, "", "HF_EMPTY_TRANSCRIPT", status
+            return False, "", "SILICONFLOW_EMPTY_TRANSCRIPT", status
         return True, txt, "", status
     except Exception:
-        return False, "", "HF_JSON_PARSE_ERR", status
+        return False, "", "SILICONFLOW_JSON_PARSE_ERR", status
 
 
 @dataclass
@@ -1343,6 +1435,26 @@ def _empty_retry_window(seg: SpeechSeg) -> Tuple[float, float]:
     retry_end = max(retry_start + 0.02, seg.end + pad)
     return retry_start, retry_end
 
+
+
+
+def resolve_segment_concurrency(model: str, options: Dict[str, Any]) -> int:
+    default_limit = Config.SILICONFLOW_CONCURRENCY if is_siliconflow_model(model) else Config.CONCURRENCY
+
+    user_val = options.get("segment_concurrency")
+    if user_val is None:
+        return default_limit
+
+    try:
+        requested = int(float(user_val))
+    except Exception:
+        return default_limit
+
+    requested = max(1, requested)
+    if is_siliconflow_model(model):
+        # 免费层常见限流更严格，强制不超过环境变量上限，避免 429 导致大量空段。
+        return min(requested, Config.SILICONFLOW_CONCURRENCY)
+    return min(requested, Config.CONCURRENCY)
 
 def transcribe_task(
     job_id: str,
@@ -1365,8 +1477,13 @@ def transcribe_task(
     try:
         extract_segment_wav(full_wav, seg_file, seg.start, seg.end)
 
-        if "kotoba" in model:
-            ok, txt, err, code = transcribe_with_hf(seg_file)
+        if is_siliconflow_model(model):
+            ok, txt, err, code = transcribe_with_siliconflow(seg_file)
+            # 对 SILICONFLOW 空转写做扩窗重试，减少短片段遗漏。
+            if (not ok) and err == "SILICONFLOW_EMPTY_TRANSCRIPT":
+                retry_start, retry_end = _empty_retry_window(seg)
+                extract_segment_wav(full_wav, seg_file, retry_start, retry_end)
+                ok, txt, err, code = transcribe_with_siliconflow(seg_file)
         else:
             ok, txt, err, code = transcribe_with_deepgram(seg_file, model, language, options)
             # 对 EMPTY_TRANSCRIPT 做更稳健重试：扩窗 +（若指定语言）自动语言兜底。
@@ -1451,6 +1568,11 @@ def process_job(job_id: str) -> None:
     language = payload.get("language", "auto")
     options = payload.get("options") or {}
 
+    effective_language = language
+    if is_siliconflow_model(model) and language != "auto":
+        append_log(job_id, f"ℹ️ SenseVoice 模型启用自动语种识别，已忽略请求语言 {language}，改为 auto")
+        effective_language = "auto"
+
     if not file_path.exists():
         set_error(job_id, "上传文件不存在或已被清理")
         append_log(job_id, "❌ 上传文件缺失")
@@ -1464,7 +1586,7 @@ def process_job(job_id: str) -> None:
     try:
         set_status(job_id, "running")
         set_progress(job_id, 1)
-        append_log(job_id, f"🚀 任务启动 | 模型: {model} | 语言: {language}")
+        append_log(job_id, f"🚀 任务启动 | 模型: {model} | 语言: {language} | 实际识别语言: {effective_language}")
 
         wav = TMP_ROOT / job_id / "normalized.wav"
         normalize_to_wav(file_path, wav)
@@ -1533,9 +1655,12 @@ def process_job(job_id: str) -> None:
         empty_count = 0
         total = len(segments)
 
-        with ThreadPoolExecutor(max_workers=Config.CONCURRENCY) as executor:
+        seg_concurrency = resolve_segment_concurrency(model, options if isinstance(options, dict) else {})
+        append_log(job_id, f"🧵 转写并发: {seg_concurrency}（模型: {model}）")
+
+        with ThreadPoolExecutor(max_workers=seg_concurrency) as executor:
             future_map = {
-                executor.submit(transcribe_task, job_id, i, seg, wav, model, language, options): i
+                executor.submit(transcribe_task, job_id, i, seg, wav, model, effective_language, options): i
                 for i, seg in enumerate(segments)
             }
             done = 0
@@ -1702,7 +1827,7 @@ def index():
     return render_template(
         "index.html",
         app_title=Config.APP_TITLE,
-        model_jp="kotoba-tech/kotoba-whisper-v2.2",
+        model_sensevoice=Config.SENSEVOICE_MODEL_ID,
         default_model=Config.DEFAULT_MODEL,
         auth_enabled=bool(Config.API_AUTH_TOKEN),
     )
@@ -1740,12 +1865,18 @@ def api_config():
             "default_model": Config.DEFAULT_MODEL,
             "supported_lang": sorted(Config.SUPPORTED_LANG),
             "supported_models": sorted(Config.SUPPORTED_MODELS),
+            "segment_concurrency": {
+                "default": Config.CONCURRENCY,
+                "sensevoice_max": Config.SILICONFLOW_CONCURRENCY,
+            },
             "vad_defaults": {
                 "engine": "silero-vad",
                 "vad_threshold": Config.SILERO_VAD_THRESHOLD,
                 "vad_min_silence_ms": Config.SILERO_MIN_SILENCE_MS,
                 "vad_min_speech_ms": Config.SILERO_MIN_SPEECH_MS,
                 "vad_speech_pad_ms": Config.SILERO_SPEECH_PAD_MS,
+                "vad_relax_min_audio_seconds": Config.VAD_RELAX_MIN_AUDIO_SECONDS,
+                "vad_low_speech_ratio": Config.VAD_LOW_SPEECH_RATIO,
                 "vad_preset": Config.VAD_PRESET_DEFAULT if Config.VAD_PRESET_DEFAULT in vad_presets() else "general",
                 "vad_presets": vad_presets(),
                 "min_transcribe_segment_seconds": Config.MIN_TRANSCRIBE_SEGMENT_SECONDS,
@@ -1775,7 +1906,10 @@ def api_start():
     if model not in Config.SUPPORTED_MODELS:
         return jsonify({"ok": False, "error": f"不支持的模型: {model}"}), 400
 
-    if "kotoba" not in model and not Config.DEEPGRAM_API_KEY:
+    if is_siliconflow_model(model):
+        if not Config.SILICONFLOW_API_KEY:
+            return jsonify({"ok": False, "error": "SILICONFLOW_API_KEY 未配置"}), 400
+    elif not Config.DEEPGRAM_API_KEY:
         return jsonify({"ok": False, "error": "DEEPGRAM_API_KEY 未配置"}), 400
 
     original_name = (f.filename or "upload.bin").strip() or "upload.bin"

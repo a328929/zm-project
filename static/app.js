@@ -48,7 +48,7 @@
       langLabel: "语音语言",
       langHint: "仅支持：中文、英文、日语",
       modelLabel: "模型选择",
-      modelHint: "默认: nova-2-general；另含 nova-3-general、whisper-large 与日语专精模型",
+      modelHint: "默认: nova-2-general；另含 nova-3-general、whisper-large 与 SenseVoiceSmall",
       fileLabel: "上传文件",
       dropText: "拖拽到这里，或点击选择",
       fileHint: "支持 mp3/wav/m4a/mp4 等，后端会自动处理",
@@ -85,7 +85,7 @@
       failed: "任务失败：",
       cancelled: "任务已取消。",
       networkErr: "网络错误：",
-      modelJP: "提示：你选择了日语专精模型，建议语言设为 ja 以获得最佳准确率。",
+      modelJP: "提示：你选择了 SenseVoiceSmall，建议语言设为 auto/zh/en/ja 以匹配语音内容。",
       savePref: "✅ 已自动保存参数",
       cancelSent: "🛑 取消请求已发送",
       cancelFailed: "取消失败：",
@@ -107,7 +107,7 @@
       langLabel: "Spoken Language",
       langHint: "Supported: Chinese, English, Japanese",
       modelLabel: "Model Selection",
-      modelHint: "Default: nova-2-general; plus nova-3-general, whisper-large, JP-specialized model",
+      modelHint: "Default: nova-2-general; plus nova-3-general, whisper-large, and SenseVoiceSmall",
       fileLabel: "Upload File",
       dropText: "Drag file here, or click to select",
       fileHint: "Supports mp3/wav/m4a/mp4 and more.",
@@ -144,7 +144,7 @@
       failed: "Job failed: ",
       cancelled: "Job cancelled.",
       networkErr: "Network error: ",
-      modelJP: "Hint: Japanese model selected. Set language to ja for best accuracy.",
+      modelJP: "Hint: SenseVoiceSmall selected. Use auto/zh/en/ja to match your audio.",
       savePref: "✅ Preferences auto-saved",
       cancelSent: "🛑 Cancel request sent",
       cancelFailed: "Cancel failed: ",
@@ -203,7 +203,7 @@
       failed: "失敗: ",
       cancelled: "ジョブはキャンセルされました。",
       networkErr: "ネットワークエラー: ",
-      modelJP: "ヒント: 日本語特化モデル選択中。ja を推奨します。",
+      modelJP: "ヒント: SenseVoiceSmall を選択中。音声に合わせて auto/zh/en/ja を選んでください。",
       savePref: "✅ 設定を自動保存しました",
       cancelSent: "🛑 キャンセル要求を送信しました",
       cancelFailed: "キャンセル失敗: ",
@@ -238,7 +238,7 @@
 
   function updateNoticeForModel() {
     const m = modelSelect.value;
-    notice.textContent = (m === "kotoba-tech/kotoba-whisper-v2.2") ? t("modelJP") : "";
+    notice.textContent = (m === "FunAudioLLM/SenseVoiceSmall") ? t("modelJP") : "";
   }
 
   function addLog(msg, timestamp) {
