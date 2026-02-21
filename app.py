@@ -93,15 +93,13 @@ class Config:
     # 鉴权（可选，为兼容默认关闭）
     API_AUTH_TOKEN = _env_str("API_AUTH_TOKEN", "")
 
-    # Deepgram / HF
+    # Deepgram / SiliconFlow
     DEEPGRAM_API_KEY = _env_str("DEEPGRAM_API_KEY", "")
     DEEPGRAM_BASE_URL = _env_str("DEEPGRAM_BASE_URL", "https://api.deepgram.com/v1").rstrip("/")
-    HF_TOKEN = _env_str("HF_TOKEN", "")
-    HF_KOTOBA_URL = _env_str(
-        "HF_KOTOBA_URL",
-        "https://api-inference.huggingface.co/models/kotoba-tech/kotoba-whisper-v2.2",
-    )
-    ENABLE_LOCAL_KOTOBA = _env_bool("ENABLE_LOCAL_KOTOBA", False)
+    SILICONFLOW_API_KEY = _env_str("SILICONFLOW_API_KEY", "")
+    SILICONFLOW_BASE_URL = _env_str("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1").rstrip("/")
+    SILICONFLOW_ASR_ENDPOINT = _env_str("SILICONFLOW_ASR_ENDPOINT", "/audio/transcriptions")
+    SENSEVOICE_MODEL_ID = _env_str("SENSEVOICE_MODEL_ID", "FunAudioLLM/SenseVoiceSmall")
 
     # 上传与运行限制
     MAX_UPLOAD_MB = _env_int("MAX_UPLOAD_MB", 4096, minimum=1)
@@ -132,7 +130,7 @@ class Config:
         "nova-2-general",
         "nova-3-general",
         "whisper-large",
-        "kotoba-tech/kotoba-whisper-v2.2",
+        "FunAudioLLM/SenseVoiceSmall",
     }
 
     # 质量调优
@@ -233,7 +231,7 @@ META_DIRTY_LOCK = threading.RLock()
 JOB_QUEUE: "queue.Queue[str]" = queue.Queue()
 SHUTDOWN = threading.Event()
 
-EMPTY_SEGMENT_ERRORS = {"EMPTY_TRANSCRIPT", "EMPTY_AFTER_NORMALIZE", "HF_EMPTY_TRANSCRIPT"}
+EMPTY_SEGMENT_ERRORS = {"EMPTY_TRANSCRIPT", "EMPTY_AFTER_NORMALIZE", "SILICONFLOW_EMPTY_TRANSCRIPT"}
 
 SESSION = requests.Session()
 retries = Retry(
@@ -280,6 +278,16 @@ def dg_url(path: str) -> str:
     if base.endswith("/v1"):
         base = base[:-3]
     return f"{base}/v1/{path.lstrip('/')}"
+
+
+def sf_url(path: str) -> str:
+    # SiliconFlow 兼容 OpenAI 风格路径，支持用户传全路径/相对路径
+    base = Config.SILICONFLOW_BASE_URL.rstrip("/")
+    return f"{base}/{path.lstrip('/')}"
+
+
+def is_siliconflow_model(model: str) -> bool:
+    return (model or "").strip().lower() == Config.SENSEVOICE_MODEL_ID.lower()
 
 
 def mask_secret(s: str, keep: int = 4) -> str:
@@ -1069,8 +1077,8 @@ def normalize_transcript_text(text: str, language: str = "auto", model: str = ""
 
     model_l = (model or "").lower()
 
-    # 若模型输出全部是按字空格（典型 whisper/kotoba 在 CJK 场景异常），再做一次紧缩
-    if language in {"zh", "ja", "auto"} or "whisper" in model_l or "kotoba" in model_l:
+    # 若模型输出全部是按字空格（典型 whisper/sensevoice 在 CJK 场景异常），再做一次紧缩
+    if language in {"zh", "ja", "auto"} or "whisper" in model_l or "sensevoice" in model_l:
         x = re.sub(rf"(?<=[{cjk}])\s+(?=[{cjk}])", "", x)
         x = re.sub(rf"(?<=[{cjk}])\s+(?=[，。！？、；：])", "", x)
         x = re.sub(rf"(?<=[，。！？、；：])\s+(?=[{cjk}])", "", x)
@@ -1107,7 +1115,7 @@ def _char_budget(language: str, model: str = "") -> int:
         return 20
     if language == "zh":
         return 24
-    if language == "auto" and ("kotoba" in model_l or "whisper" in model_l):
+    if language == "auto" and ("sensevoice" in model_l or "whisper" in model_l):
         return 22
     return 42
 
@@ -1293,37 +1301,101 @@ def transcribe_with_deepgram(seg_file: Path, model: str, language: str, options:
         return False, "", "DG_JSON_PARSE_ERR", status
 
 
-def transcribe_with_hf(seg_file: Path) -> Tuple[bool, str, str, int]:
-    if not Config.HF_TOKEN:
-        return False, "", "HF_TOKEN missing", 0
+def _extract_text_candidates(obj: Any, out: List[str]) -> None:
+    if obj is None:
+        return
+    if isinstance(obj, str):
+        t = obj.strip()
+        if t:
+            out.append(t)
+        return
+    if isinstance(obj, list):
+        for item in obj:
+            _extract_text_candidates(item, out)
+        return
+    if isinstance(obj, dict):
+        direct_keys = (
+            "text",
+            "transcript",
+            "sentence",
+            "content",
+            "result",
+            "prediction",
+        )
+        for key in direct_keys:
+            val = obj.get(key)
+            if isinstance(val, str) and val.strip():
+                out.append(val.strip())
 
+        for key in ("segments", "results", "items", "alternatives", "output"):
+            nested = obj.get(key)
+            if nested is not None:
+                _extract_text_candidates(nested, out)
+
+
+def parse_transcript_payload(data: Any) -> str:
+    candidates: List[str] = []
+    _extract_text_candidates(data, candidates)
+
+    uniq: List[str] = []
+    seen = set()
+    for x in candidates:
+        k = x.strip()
+        if not k:
+            continue
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(k)
+
+    if not uniq:
+        return ""
+
+    # 若同时存在整段 text 和逐段 segments，优先使用最长项，避免重复拼接。
+    return max(uniq, key=len)
+
+
+def transcribe_with_siliconflow(seg_file: Path, language: str) -> Tuple[bool, str, str, int]:
+    if not Config.SILICONFLOW_API_KEY:
+        return False, "", "SILICONFLOW_API_KEY missing", 0
+
+    endpoint = Config.SILICONFLOW_ASR_ENDPOINT or "/audio/transcriptions"
     headers = {
-        "Authorization": f"Bearer {Config.HF_TOKEN}",
-        "Content-Type": "audio/wav",
+        "Authorization": f"Bearer {Config.SILICONFLOW_API_KEY}",
     }
-    params = {"wait_for_model": "true"}
+
+    form_data = {
+        "model": Config.SENSEVOICE_MODEL_ID,
+        "response_format": "verbose_json",
+    }
+    if language and language != "auto":
+        form_data["language"] = language
+
     with open(seg_file, "rb") as f:
+        files = {
+            "file": (seg_file.name, f, "audio/wav"),
+        }
         resp = SESSION.post(
-            Config.HF_KOTOBA_URL,
+            sf_url(endpoint),
             headers=headers,
-            params=params,
-            data=f,
+            data=form_data,
+            files=files,
             timeout=max(120, Config.REQUEST_TIMEOUT_SECONDS),
         )
 
     status = resp.status_code
     if status != 200:
         msg = (resp.text or "")[:180].replace("\n", " ")
-        return False, "", f"HF_ERR_{status}: {msg}", status
+        return False, "", f"SILICONFLOW_ERR_{status}: {msg}", status
 
     try:
         data = resp.json()
-        txt = (data.get("text") or "").strip()
+        txt = parse_transcript_payload(data)
         if not txt:
-            return False, "", "HF_EMPTY_TRANSCRIPT", status
+            return False, "", "SILICONFLOW_EMPTY_TRANSCRIPT", status
         return True, txt, "", status
     except Exception:
-        return False, "", "HF_JSON_PARSE_ERR", status
+        return False, "", "SILICONFLOW_JSON_PARSE_ERR", status
 
 
 @dataclass
@@ -1365,8 +1437,13 @@ def transcribe_task(
     try:
         extract_segment_wav(full_wav, seg_file, seg.start, seg.end)
 
-        if "kotoba" in model:
-            ok, txt, err, code = transcribe_with_hf(seg_file)
+        if is_siliconflow_model(model):
+            ok, txt, err, code = transcribe_with_siliconflow(seg_file, language)
+            # 对 SILICONFLOW 空转写做扩窗重试，减少短片段遗漏。
+            if (not ok) and err == "SILICONFLOW_EMPTY_TRANSCRIPT":
+                retry_start, retry_end = _empty_retry_window(seg)
+                extract_segment_wav(full_wav, seg_file, retry_start, retry_end)
+                ok, txt, err, code = transcribe_with_siliconflow(seg_file, language)
         else:
             ok, txt, err, code = transcribe_with_deepgram(seg_file, model, language, options)
             # 对 EMPTY_TRANSCRIPT 做更稳健重试：扩窗 +（若指定语言）自动语言兜底。
@@ -1702,7 +1779,7 @@ def index():
     return render_template(
         "index.html",
         app_title=Config.APP_TITLE,
-        model_jp="kotoba-tech/kotoba-whisper-v2.2",
+        model_sensevoice=Config.SENSEVOICE_MODEL_ID,
         default_model=Config.DEFAULT_MODEL,
         auth_enabled=bool(Config.API_AUTH_TOKEN),
     )
@@ -1775,7 +1852,10 @@ def api_start():
     if model not in Config.SUPPORTED_MODELS:
         return jsonify({"ok": False, "error": f"不支持的模型: {model}"}), 400
 
-    if "kotoba" not in model and not Config.DEEPGRAM_API_KEY:
+    if is_siliconflow_model(model):
+        if not Config.SILICONFLOW_API_KEY:
+            return jsonify({"ok": False, "error": "SILICONFLOW_API_KEY 未配置"}), 400
+    elif not Config.DEEPGRAM_API_KEY:
         return jsonify({"ok": False, "error": "DEEPGRAM_API_KEY 未配置"}), 400
 
     original_name = (f.filename or "upload.bin").strip() or "upload.bin"
