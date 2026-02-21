@@ -103,6 +103,7 @@ docker compose up -d --build
 | `SENSEVOICE_MODEL_ID` | SiliconFlow ASR 模型 ID | `FunAudioLLM/SenseVoiceSmall` |
 | `DEFAULT_MODEL` | 默认模型 | `nova-2-general` |
 | `CONCURRENCY` | 片段并发数 | `20` |
+| `SILICONFLOW_CONCURRENCY` | SenseVoice 片段并发上限（建议免费版调低） | `2` |
 | `JOB_WORKERS` | 同时执行任务数 | `1` |
 | `MAX_UPLOAD_MB` | 上传大小限制(MB) | `4096` |
 | `AUTO_CLEANUP_ENABLED` | 自动清理开关 | `1` |

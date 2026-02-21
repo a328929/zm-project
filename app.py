@@ -105,6 +105,7 @@ class Config:
     MAX_UPLOAD_MB = _env_int("MAX_UPLOAD_MB", 4096, minimum=1)
     MAX_CONTENT_LENGTH = MAX_UPLOAD_MB * 1024 * 1024
     CONCURRENCY = _env_int("CONCURRENCY", 20, minimum=1, maximum=64)  # 片段并发
+    SILICONFLOW_CONCURRENCY = _env_int("SILICONFLOW_CONCURRENCY", 2, minimum=1, maximum=16)  # SenseVoice 片段并发上限
     JOB_WORKERS = _env_int("JOB_WORKERS", 1, minimum=1, maximum=8)  # 同时跑几个任务
 
     # 请求与重试
@@ -164,7 +165,8 @@ class Config:
     def print_info(cls) -> None:
         print(f"--- [v6.0] {cls.APP_TITLE} 启动中 ---")
         print(
-            f"任务工作线程: {cls.JOB_WORKERS} | 片段并发: {cls.CONCURRENCY} | 上传限制: {cls.MAX_UPLOAD_MB}MB"
+            f"任务工作线程: {cls.JOB_WORKERS} | 片段并发: {cls.CONCURRENCY} | "
+            f"SenseVoice并发上限: {cls.SILICONFLOW_CONCURRENCY} | 上传限制: {cls.MAX_UPLOAD_MB}MB"
         )
         print(
             "清理机制: "
@@ -1416,6 +1418,26 @@ def _empty_retry_window(seg: SpeechSeg) -> Tuple[float, float]:
     return retry_start, retry_end
 
 
+
+
+def resolve_segment_concurrency(model: str, options: Dict[str, Any]) -> int:
+    default_limit = Config.SILICONFLOW_CONCURRENCY if is_siliconflow_model(model) else Config.CONCURRENCY
+
+    user_val = options.get("segment_concurrency")
+    if user_val is None:
+        return default_limit
+
+    try:
+        requested = int(float(user_val))
+    except Exception:
+        return default_limit
+
+    requested = max(1, requested)
+    if is_siliconflow_model(model):
+        # 免费层常见限流更严格，强制不超过环境变量上限，避免 429 导致大量空段。
+        return min(requested, Config.SILICONFLOW_CONCURRENCY)
+    return min(requested, Config.CONCURRENCY)
+
 def transcribe_task(
     job_id: str,
     idx: int,
@@ -1610,7 +1632,10 @@ def process_job(job_id: str) -> None:
         empty_count = 0
         total = len(segments)
 
-        with ThreadPoolExecutor(max_workers=Config.CONCURRENCY) as executor:
+        seg_concurrency = resolve_segment_concurrency(model, options if isinstance(options, dict) else {})
+        append_log(job_id, f"🧵 转写并发: {seg_concurrency}（模型: {model}）")
+
+        with ThreadPoolExecutor(max_workers=seg_concurrency) as executor:
             future_map = {
                 executor.submit(transcribe_task, job_id, i, seg, wav, model, language, options): i
                 for i, seg in enumerate(segments)
@@ -1817,6 +1842,10 @@ def api_config():
             "default_model": Config.DEFAULT_MODEL,
             "supported_lang": sorted(Config.SUPPORTED_LANG),
             "supported_models": sorted(Config.SUPPORTED_MODELS),
+            "segment_concurrency": {
+                "default": Config.CONCURRENCY,
+                "sensevoice_max": Config.SILICONFLOW_CONCURRENCY,
+            },
             "vad_defaults": {
                 "engine": "silero-vad",
                 "vad_threshold": Config.SILERO_VAD_THRESHOLD,
