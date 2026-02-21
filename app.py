@@ -1659,7 +1659,7 @@ def process_job(job_id: str) -> None:
     try:
         set_status(job_id, "running")
         set_progress(job_id, 1)
-        append_log(job_id, f"🚀 任务启动 | 模型: {model} | 语言: {effective_language} | 音频策略: {audio_profile}")
+        append_log(job_id, f"🚀 任务启动 | 模型: {model} | 语言: {effective_language}")
 
         source_wav = TMP_ROOT / job_id / "normalized_source.wav"
         normalize_to_wav(file_path, source_wav, sample_rate=int(profile_conf.get("normalize_sample_rate", 16000)))
