@@ -87,7 +87,26 @@ def _env_bool(name: str, default: bool = False) -> bool:
 # -----------------------------
 # 配置
 # -----------------------------
-class Config:
+class _ConfigMeta(type):
+    """兼容旧版本字段，避免因单个配置缺失导致任务直接失败。"""
+
+    _COMPAT_DEFAULTS: Dict[str, Any] = {
+        "VAD_RELAX_MIN_AUDIO_SECONDS": 20.0,
+        # 历史版本里出现过拼写/截断不一致，这里统一兜底。
+        "VAD_RELAX_MIN_AUDIO_SEC": 20.0,
+    }
+    _WARNED_MISSING: set[str] = set()
+
+    def __getattr__(cls, name: str) -> Any:
+        if name in cls._COMPAT_DEFAULTS:
+            if name not in cls._WARNED_MISSING:
+                print(f"[WARN] Config.{name} 缺失，使用兼容默认值: {cls._COMPAT_DEFAULTS[name]}")
+                cls._WARNED_MISSING.add(name)
+            return cls._COMPAT_DEFAULTS[name]
+        raise AttributeError(f"type object 'Config' has no attribute '{name}'")
+
+
+class Config(metaclass=_ConfigMeta):
     APP_TITLE = _env_str("APP_TITLE", "极简语音识别字幕工坊")
 
     # 鉴权（可选，为兼容默认关闭）
