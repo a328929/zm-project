@@ -118,6 +118,7 @@ docker compose up -d --build
 | `ENABLE_ONNX_VAD` | 启用 ONNX Runtime 加速 | `1` |
 | `VAD_RELAX_MIN_AUDIO_SECONDS` | 启用VAD自动放宽的最短音频时长(秒) | `20` |
 | `VAD_LOW_SPEECH_RATIO` | 触发VAD自动放宽的低有声占比阈值 | `0.12` |
+| `AUDIO_PROFILE_DEFAULT` | 默认音频处理策略（`standard`/`high_quality`） | `standard` |
 
 ---
 
@@ -137,6 +138,7 @@ docker compose up -d --build
 
 ### Q2: 中文仍有不自然空格怎么办？
 - v6 已做 CJK 空格清洗。若仍出现，可切换 `nova-2-general` 并开启 `punctuate + smart_format`。
+- 在“高级设置”里可将音频策略切到 `high_quality`（48k + 无动态归一化），对清晰慢语速中文常有帮助。
 
 ### Q3: 如何提升吞吐？
 - 提高 `CONCURRENCY`（片段并发）和 `JOB_WORKERS`（任务并发），同时提升机器 CPU/带宽。

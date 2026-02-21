@@ -22,6 +22,7 @@
   const balanceBox = $("balanceBox");
 
   const optPunctuate = $("optPunctuate");
+  const optAudioProfile = $("optAudioProfile");
   const optSmartFormat = $("optSmartFormat");
   const optVadPreset = $("optVadPreset");
   const optVadThreshold = $("optVadThreshold");
@@ -53,6 +54,8 @@
       dropText: "拖拽到这里，或点击选择",
       fileHint: "支持 mp3/wav/m4a/mp4 等，后端会自动处理",
       advSummary: "官方参数调节 (高级)",
+      labelAudioProfile: "音频处理策略",
+      audioProfileDesc: "standard=当前稳定方案；high_quality=高保真优先细节。",
       labelVadPreset: "VAD 预设方案",
       vadPresetDesc: "general=通用；asmr=耳语；mixed=混合折中。下方参数可继续微调。",
       labelVadThreshold: "Silero 检测阈值",
@@ -112,6 +115,8 @@
       dropText: "Drag file here, or click to select",
       fileHint: "Supports mp3/wav/m4a/mp4 and more.",
       advSummary: "Official Parameters (Advanced)",
+      labelAudioProfile: "Audio Processing Profile",
+      audioProfileDesc: "standard = current stable pipeline; high_quality = preserve more detail for clearer speech.",
       labelVadPreset: "VAD Preset",
       vadPresetDesc: "general = generic, asmr = whisper-focused, mixed = balanced hybrid. You can still fine-tune below.",
       labelVadThreshold: "Silero VAD Threshold",
@@ -231,7 +236,7 @@
   }
 
   function applyI18n() {
-    ["title", "subtitle", "cfgTitle", "langLabel", "langHint", "modelLabel", "modelHint", "fileLabel", "dropText", "fileHint", "advSummary", "labelVadPreset", "vadPresetDesc", "labelVadThreshold", "vadThresholdDesc", "labelVadMinSilence", "vadMinSilenceDesc", "labelVadMinSpeech", "vadMinSpeechDesc", "labelVadSpeechPad", "vadSpeechPadDesc", "labelMinTranscribeSegSec", "minTranscribeSegSecDesc", "labelShortSegMergeGapSec", "shortSegMergeGapSecDesc", "startBtn", "cancelBtn", "progTitle", "balTitle", "projectLabel", "projectHint", "checkBalanceBtn"].forEach((k) => setText(k, k));
+    ["title", "subtitle", "cfgTitle", "langLabel", "langHint", "modelLabel", "modelHint", "fileLabel", "dropText", "fileHint", "advSummary", "labelAudioProfile", "audioProfileDesc", "labelVadPreset", "vadPresetDesc", "labelVadThreshold", "vadThresholdDesc", "labelVadMinSilence", "vadMinSilenceDesc", "labelVadMinSpeech", "vadMinSpeechDesc", "labelVadSpeechPad", "vadSpeechPadDesc", "labelMinTranscribeSegSec", "minTranscribeSegSecDesc", "labelShortSegMergeGapSec", "shortSegMergeGapSecDesc", "startBtn", "cancelBtn", "progTitle", "balTitle", "projectLabel", "projectHint", "checkBalanceBtn"].forEach((k) => setText(k, k));
     downloadBtn.textContent = t("downloadBtn");
     updateNoticeForModel();
   }
@@ -332,8 +337,10 @@
     }
 
     const preset = (optVadPreset.value || "general").trim().toLowerCase();
+    const audioProfile = (optAudioProfile.value || "standard").trim().toLowerCase();
 
     return {
+      audio_profile: ["standard", "high_quality"].includes(audioProfile) ? audioProfile : "standard",
       smart_format: !!optSmartFormat.checked,
       punctuate: !!optPunctuate.checked,
       vad_preset: ["general", "asmr", "mixed"].includes(preset) ? preset : "general",
@@ -354,6 +361,7 @@
       opt: {
         punctuate: !!optPunctuate.checked,
         smart_format: !!optSmartFormat.checked,
+        audio_profile: (optAudioProfile.value || "standard"),
         vad_preset: (optVadPreset.value || "general"),
         vad_threshold: Number(optVadThreshold.value || 0.5),
         vad_min_silence_ms: Number(optVadMinSilenceMs.value || 400),
@@ -378,6 +386,10 @@
     if (pref.opt) {
       optPunctuate.checked = !!pref.opt.punctuate;
       optSmartFormat.checked = !!pref.opt.smart_format;
+      if (typeof pref.opt.audio_profile === "string") {
+        const ap = String(pref.opt.audio_profile).toLowerCase();
+        optAudioProfile.value = ["standard", "high_quality"].includes(ap) ? ap : "standard";
+      }
       if (typeof pref.opt.vad_preset === "string") {
         const pp = String(pref.opt.vad_preset).toLowerCase();
         optVadPreset.value = ["general", "asmr", "mixed"].includes(pp) ? pp : "general";
@@ -447,6 +459,25 @@
         && ![...modelSelect.options].some((x) => x.value === modelSelect.value)
       ) {
         modelSelect.value = data.default_model;
+      }
+
+      const ad = data.audio_defaults || {};
+      const profiles = ad.profiles || {};
+      if (profiles && typeof profiles === "object") {
+        const currentAudio = optAudioProfile.value || "standard";
+        optAudioProfile.innerHTML = "";
+        ["standard", "high_quality"].forEach((k) => {
+          if (!profiles[k]) return;
+          const op = document.createElement("option");
+          op.value = k;
+          op.textContent = `${k}（${(profiles[k].label || k)}）`;
+          optAudioProfile.appendChild(op);
+        });
+        if ([...optAudioProfile.options].some((x) => x.value === currentAudio)) optAudioProfile.value = currentAudio;
+      }
+      const defaultAudioProfile = String(ad.profile || "").toLowerCase();
+      if ([...optAudioProfile.options].some((x) => x.value === defaultAudioProfile) && !optAudioProfile.value) {
+        optAudioProfile.value = defaultAudioProfile;
       }
 
       const vd = data.vad_defaults || {};
@@ -699,7 +730,7 @@
   langSelect.addEventListener("change", persistPref);
   fileInput.addEventListener("change", updatePickedFile);
 
-  [optPunctuate, optSmartFormat, optVadPreset, optVadThreshold, optVadMinSilenceMs, optVadMinSpeechMs, optVadSpeechPadMs, optMinTranscribeSegSec, optShortSegMergeGapSec].forEach((el) => {
+  [optPunctuate, optSmartFormat, optAudioProfile, optVadPreset, optVadThreshold, optVadMinSilenceMs, optVadMinSpeechMs, optVadSpeechPadMs, optMinTranscribeSegSec, optShortSegMergeGapSec].forEach((el) => {
     el.addEventListener("change", persistPref);
   });
 
